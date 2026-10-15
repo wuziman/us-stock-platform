@@ -1,122 +1,187 @@
 {
-  "scan_date": "2026-09-03 22:39:44",
+  "scan_date": "2026-09-04 17:19:48",
   "total_scanned": 35,
   "top5": [
+    {
+      "code": "SMCI",
+      "name": "超微电脑",
+      "sector": "高密AI服务器整机柜",
+      "current_price": 37.87,
+      "rsi": 43.4,
+      "m20_return": 21.7,
+      "win_rate": 61.1,
+      "momentum_score": 35.0,
+      "sweetspot_score": 20.0,
+      "backtest_score": 30.0,
+      "total_score": 85.0,
+      "earnings": {
+        "date": "2026-11-04",
+        "days": 61,
+        "tag": "",
+        "is_imminent": false
+      },
+      "linear_buy": 36.36,
+      "nonlinear_buy": 35.88,
+      "linear_profit": 41.81,
+      "linear_stop": 33.45
+    },
     {
       "code": "DELL",
       "name": "戴尔科技",
       "sector": "企业级AI服务器",
-      "current_price": 505.22,
-      "rsi": 53.0,
-      "m20_return": 11.3,
-      "win_rate": 73.3,
+      "current_price": 516.39,
+      "rsi": 55.1,
+      "m20_return": 13.8,
+      "win_rate": 62.5,
       "momentum_score": 40.0,
       "sweetspot_score": 15.0,
       "backtest_score": 30.0,
       "total_score": 85.0,
       "earnings": {
         "date": "2026-11-28",
-        "days": 86,
+        "days": 85,
         "tag": "",
         "is_imminent": false
       },
-      "linear_buy": 462.04,
-      "nonlinear_buy": 452.8,
-      "linear_profit": 531.34,
-      "linear_stop": 425.07
+      "linear_buy": 462.6,
+      "nonlinear_buy": 453.34,
+      "linear_profit": 531.99,
+      "linear_stop": 425.59
     },
     {
-      "code": "SMCI",
-      "name": "超微电脑",
-      "sector": "高密AI服务器整机柜",
-      "current_price": 36.35,
-      "rsi": 38.1,
-      "m20_return": 16.8,
-      "win_rate": 61.1,
-      "momentum_score": 29.0,
+      "code": "MU",
+      "name": "美光科技",
+      "sector": "HBM3e高带宽存储",
+      "current_price": 958.16,
+      "rsi": 47.9,
+      "m20_return": 9.2,
+      "win_rate": 66.7,
+      "momentum_score": 34.6,
+      "sweetspot_score": 20.0,
+      "backtest_score": 30.0,
+      "total_score": 84.6,
+      "earnings": {
+        "date": "2026-10-01",
+        "days": 27,
+        "tag": "",
+        "is_imminent": false
+      },
+      "linear_buy": 919.83,
+      "nonlinear_buy": 917.63,
+      "linear_profit": 1057.81,
+      "linear_stop": 846.25
+    },
+    {
+      "code": "HPE",
+      "name": "慧与科技",
+      "sector": "高性能超算与企业云",
+      "current_price": 54.44,
+      "rsi": 38.2,
+      "m20_return": 2.3,
+      "win_rate": 70.6,
+      "momentum_score": 25.1,
       "sweetspot_score": 25.0,
       "backtest_score": 30.0,
-      "total_score": 84.0,
+      "total_score": 80.1,
       "earnings": {
-        "date": "2026-11-04",
-        "days": 62,
+        "date": "2026-09-03",
+        "days": -1,
         "tag": "",
         "is_imminent": false
       },
-      "linear_buy": 34.9,
-      "nonlinear_buy": 35.8,
-      "linear_profit": 40.13,
-      "linear_stop": 32.1
+      "linear_buy": 52.26,
+      "nonlinear_buy": 53.39,
+      "linear_profit": 60.1,
+      "linear_stop": 48.08
     },
     {
-      "code": "AAOI",
-      "name": "祥茂光电",
-      "sector": "高弹性数据中心光模块",
-      "current_price": 98.59,
-      "rsi": 21.3,
-      "m20_return": -27.3,
-      "win_rate": 73.7,
+      "code": "ASML",
+      "name": "阿斯麦",
+      "sector": "EUV光刻机绝对垄断",
+      "current_price": 1646.19,
+      "rsi": 21.6,
+      "m20_return": -5.4,
+      "win_rate": 50.0,
       "momentum_score": 20.0,
-      "sweetspot_score": 30.0,
-      "backtest_score": 30.0,
+      "sweetspot_score": 35.0,
+      "backtest_score": 25.0,
       "total_score": 80.0,
       "earnings": {
-        "date": "2026-11-06",
-        "days": 64,
+        "date": "2026-10-14",
+        "days": 40,
         "tag": "",
         "is_imminent": false
       },
-      "linear_buy": 94.65,
-      "nonlinear_buy": 90.29,
-      "linear_profit": 108.84,
-      "linear_stop": 87.07
-    },
-    {
-      "code": "KLAC",
-      "name": "科磊半导体",
-      "sector": "工艺控制与缺陷检测",
-      "current_price": 168.85,
-      "rsi": 12.7,
-      "m20_return": -14.7,
-      "win_rate": 61.5,
-      "momentum_score": 15.0,
-      "sweetspot_score": 30.0,
-      "backtest_score": 30.0,
-      "total_score": 75.0,
-      "earnings": {
-        "date": "2026-10-29",
-        "days": 56,
-        "tag": "",
-        "is_imminent": false
-      },
-      "linear_buy": 162.09,
-      "nonlinear_buy": 162.86,
-      "linear_profit": 186.4,
-      "linear_stop": 149.12
-    },
-    {
-      "code": "AXTI",
-      "name": "AXT",
-      "sector": "磷化铟光通信衬底材料",
-      "current_price": 54.31,
-      "rsi": 30.3,
-      "m20_return": -38.7,
-      "win_rate": 68.4,
-      "momentum_score": 20.0,
-      "sweetspot_score": 25.0,
-      "backtest_score": 30.0,
-      "total_score": 75.0,
-      "earnings": {
-        "date": "2026-10-30",
-        "days": 57,
-        "tag": "",
-        "is_imminent": false
-      },
-      "linear_buy": 52.14,
-      "nonlinear_buy": 48.8,
-      "linear_profit": 59.96,
-      "linear_stop": 47.97
+      "linear_buy": 1580.34,
+      "nonlinear_buy": 1629.11,
+      "linear_profit": 1817.39,
+      "linear_stop": 1453.91
     }
   ],
-  "ai_thesis": "AI研报生成中遇到临时延迟，各标的量化点位已就绪。"
+  "ai_thesis": "AI研报生成中遇到临时延迟，各标的量化点位已就绪。",
+  "battle_report": {
+    "prev_scan_date": "2026-09-03 22:39:44",
+    "review_date": "2026-09-04 17:18:43",
+    "picks": [
+      {
+        "code": "DELL",
+        "name": "戴尔科技",
+        "sector": "企业级AI服务器",
+        "entry_price": 505.22,
+        "review_price": 516.39,
+        "weekly_return_pct": 2.21,
+        "is_winner": true
+      },
+      {
+        "code": "SMCI",
+        "name": "超微电脑",
+        "sector": "高密AI服务器整机柜",
+        "entry_price": 36.35,
+        "review_price": 37.87,
+        "weekly_return_pct": 4.18,
+        "is_winner": true
+      },
+      {
+        "code": "AAOI",
+        "name": "祥茂光电",
+        "sector": "高弹性数据中心光模块",
+        "entry_price": 98.59,
+        "review_price": 100.38,
+        "weekly_return_pct": 1.82,
+        "is_winner": true
+      },
+      {
+        "code": "KLAC",
+        "name": "科磊半导体",
+        "sector": "工艺控制与缺陷检测",
+        "entry_price": 168.85,
+        "review_price": 172.94,
+        "weekly_return_pct": 2.42,
+        "is_winner": true
+      },
+      {
+        "code": "AXTI",
+        "name": "AXT",
+        "sector": "磷化铟光通信衬底材料",
+        "entry_price": 54.31,
+        "review_price": 56.2,
+        "weekly_return_pct": 3.48,
+        "is_winner": true
+      }
+    ],
+    "win_count": 5,
+    "loss_count": 0,
+    "win_rate": 100.0,
+    "avg_return_pct": 2.82,
+    "best_pick": {
+      "code": "SMCI",
+      "name": "超微电脑",
+      "return_pct": 4.18
+    },
+    "worst_pick": {
+      "code": "AAOI",
+      "name": "祥茂光电",
+      "return_pct": 1.82
+    }
+  }
 }

@@ -1,0 +1,107 @@
+[
+  {
+    "scan_date": "2026-09-04 17:19:48",
+    "top5": [
+      {
+        "code": "SMCI",
+        "name": "超微电脑",
+        "sector": "高密AI服务器整机柜",
+        "total_score": 85.0,
+        "current_price": 37.87
+      },
+      {
+        "code": "DELL",
+        "name": "戴尔科技",
+        "sector": "企业级AI服务器",
+        "total_score": 85.0,
+        "current_price": 516.39
+      },
+      {
+        "code": "MU",
+        "name": "美光科技",
+        "sector": "HBM3e高带宽存储",
+        "total_score": 84.6,
+        "current_price": 958.16
+      },
+      {
+        "code": "HPE",
+        "name": "慧与科技",
+        "sector": "高性能超算与企业云",
+        "total_score": 80.1,
+        "current_price": 54.44
+      },
+      {
+        "code": "ASML",
+        "name": "阿斯麦",
+        "sector": "EUV光刻机绝对垄断",
+        "total_score": 80.0,
+        "current_price": 1646.19
+      }
+    ],
+    "battle_report": {
+      "prev_scan_date": "2026-09-03 22:39:44",
+      "review_date": "2026-09-04 17:18:43",
+      "picks": [
+        {
+          "code": "DELL",
+          "name": "戴尔科技",
+          "sector": "企业级AI服务器",
+          "entry_price": 505.22,
+          "review_price": 516.39,
+          "weekly_return_pct": 2.21,
+          "is_winner": true
+        },
+        {
+          "code": "SMCI",
+          "name": "超微电脑",
+          "sector": "高密AI服务器整机柜",
+          "entry_price": 36.35,
+          "review_price": 37.87,
+          "weekly_return_pct": 4.18,
+          "is_winner": true
+        },
+        {
+          "code": "AAOI",
+          "name": "祥茂光电",
+          "sector": "高弹性数据中心光模块",
+          "entry_price": 98.59,
+          "review_price": 100.38,
+          "weekly_return_pct": 1.82,
+          "is_winner": true
+        },
+        {
+          "code": "KLAC",
+          "name": "科磊半导体",
+          "sector": "工艺控制与缺陷检测",
+          "entry_price": 168.85,
+          "review_price": 172.94,
+          "weekly_return_pct": 2.42,
+          "is_winner": true
+        },
+        {
+          "code": "AXTI",
+          "name": "AXT",
+          "sector": "磷化铟光通信衬底材料",
+          "entry_price": 54.31,
+          "review_price": 56.2,
+          "weekly_return_pct": 3.48,
+          "is_winner": true
+        }
+      ],
+      "win_count": 5,
+      "loss_count": 0,
+      "win_rate": 100.0,
+      "avg_return_pct": 2.82,
+      "best_pick": {
+        "code": "SMCI",
+        "name": "超微电脑",
+        "return_pct": 4.18
+      },
+      "worst_pick": {
+        "code": "AAOI",
+        "name": "祥茂光电",
+        "return_pct": 1.82
+      }
+    }
+  }
+]
