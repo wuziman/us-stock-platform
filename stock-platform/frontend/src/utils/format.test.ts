@@ -1,15 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { colors } from '../theme/tokens';
-import { fmtDist, fmtPx, pctColor } from './format';
+import { buildCsvContent, calcPositionSize, currencySymbol, fmtDist, fmtPx, pctColor } from './format';
 
 describe('fmtPx 价格格式化', () => {
-  it('两位小数带美元符', () => {
+  it('两位小数带美元符（默认美股）', () => {
     expect(fmtPx(910.43)).toBe('$910.43');
     expect(fmtPx(864.9)).toBe('$864.90');
+    expect(fmtPx(864.9, 'US')).toBe('$864.90');
+  });
+
+  it('A股市场使用人民币符号 ¥', () => {
+    expect(fmtPx(1500.5, 'A')).toBe('¥1500.50');
+    expect(currencySymbol('A')).toBe('¥');
+    expect(currencySymbol('US')).toBe('$');
   });
 
   it('null 显示占位符（后端指标不足时点位为null）', () => {
     expect(fmtPx(null)).toBe('--');
+    expect(fmtPx(null, 'A')).toBe('--');
   });
 });
 
@@ -42,5 +50,32 @@ describe('pctColor 涨跌三色（DESIGN.md 盈亏语义）', () => {
 
   it('零→textSecondary灰（零值不得着绿）', () => {
     expect(pctColor(0)).toBe(colors.textSecondary);
+  });
+});
+
+describe('calcPositionSize 2%定额风险与40%单票上限计算器', () => {
+  it('按2%最大风险计算股数并遵守40%单票上限', () => {
+    // 10万资金，买价100，止损92（每股风险8元）：2%风险=2000元 -> 250股（市值25000，占25% <= 40%）
+    const res = calcPositionSize(100000, 100, 92);
+    expect(res.recommendedShares).toBe(250);
+    expect(res.firstTrancheShares).toBe(125);
+    expect(res.positionPct).toBe(25.0);
+    expect(res.cappedBy40Pct).toBe(false);
+  });
+
+  it('止损极窄时自动被40%单票上限截断', () => {
+    // 10万资金，买价100，止损99（每股风险1元）：2%风险=2000股，但40%上限=400股
+    const res = calcPositionSize(100000, 100, 99);
+    expect(res.recommendedShares).toBe(400);
+    expect(res.cappedBy40Pct).toBe(true);
+  });
+});
+
+describe('buildCsvContent UTF-8 BOM 与转义', () => {
+  it('包含BOM头且正确转义逗号与双引号', () => {
+    const csv = buildCsvContent(['代码', '备注'], [['MU', '含,逗号'], ['NVDA', '含"引号"']]);
+    expect(csv.startsWith('\uFEFF代码,备注\r\n')).toBe(true);
+    expect(csv.includes('MU,"含,逗号"')).toBe(true);
+    expect(csv.includes('NVDA,"含""引号"""')).toBe(true);
   });
 });

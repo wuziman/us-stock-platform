@@ -1,7 +1,5 @@
 {
   "permissions": {
-    "allow": [
-      "Read(//c/Users/wuzim/.claude/**)"
-    ]
+    "allow": []
   }
 }

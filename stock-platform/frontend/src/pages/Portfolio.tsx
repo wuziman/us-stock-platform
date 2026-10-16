@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Table, Button, Modal, Form, Input, InputNumber, DatePicker, Tag, Space, Statistic, Row, Col, message, Popconfirm, Alert, Tabs, Tooltip } from 'antd';
-import { PlusOutlined, DeleteOutlined, EditOutlined, ThunderboltFilled, WarningFilled, SettingOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, EditOutlined, ThunderboltFilled, WarningFilled, SettingOutlined, DownloadOutlined } from '@ant-design/icons';
 import { portfolioApi } from '../services/api';
 import type { Position, PositionSummary } from '../types/api';
 import dayjs from 'dayjs';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
 import { colors } from '../theme/tokens';
+import { calcPositionSize, currencySymbol, downloadCsv } from '../utils/format';
 
 const Portfolio: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -188,6 +189,54 @@ const Portfolio: React.FC = () => {
     }
   };
 
+  const handleExportCsv = () => {
+    if (activeTab === 'holding') {
+      if (positions.length === 0) {
+        message.info('当前暂无持仓可导出');
+        return;
+      }
+      downloadCsv(
+        'portfolio_holdings.csv',
+        ['股票代码', '股票名称', '市场', '买入价', '数量', '现价', '浮动盈亏', '收益率(%)', '止损位', '止盈位', '持有天数'],
+        positions.map((p) => [
+          p.stock_code,
+          p.stock_name,
+          p.market,
+          p.buy_price,
+          p.quantity,
+          p.current_price ?? '',
+          p.profit_loss ?? '',
+          p.profit_loss_pct ?? '',
+          p.stop_loss ?? '',
+          p.take_profit ?? '',
+          p.holding_days ?? '',
+        ])
+      );
+    } else {
+      if (history.length === 0) {
+        message.info('当前暂无历史交易可导出');
+        return;
+      }
+      downloadCsv(
+        'portfolio_history.csv',
+        ['股票代码', '股票名称', '市场', '买入价', '数量', '卖出价', '买入日', '卖出日', '持有天数', '已实现盈亏', '已实现收益率(%)'],
+        history.map((p) => [
+          p.stock_code,
+          p.stock_name,
+          p.market,
+          p.buy_price,
+          p.quantity,
+          p.sell_price ?? '',
+          p.buy_date?.slice(0, 10) ?? '',
+          p.sell_date?.slice(0, 10) ?? '',
+          p.holding_days ?? '',
+          p.realized_pnl ?? '',
+          p.realized_pnl_pct ?? '',
+        ])
+      );
+    }
+  };
+
   // ---------- 表格列 ----------
   const holdingColumns = [
     { title: '代码', dataIndex: 'stock_code', key: 'stock_code', width: 90 },
@@ -196,11 +245,11 @@ const Portfolio: React.FC = () => {
       title: '市场', dataIndex: 'market', key: 'market', width: 70,
       render: (m: string) => <Tag color={m === 'A' ? 'red' : 'blue'}>{m === 'A' ? 'A股' : '美股'}</Tag>
     },
-    { title: '买入价', dataIndex: 'buy_price', key: 'buy_price', width: 90, render: (p: number) => `$${p.toFixed(2)}` },
+    { title: '买入价', dataIndex: 'buy_price', key: 'buy_price', width: 90, render: (p: number, r: Position) => `${currencySymbol(r.market)}${p.toFixed(2)}` },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 70 },
     {
       title: '现价', dataIndex: 'current_price', key: 'current_price', width: 90,
-      render: (p: number | null) => p ? `$${p.toFixed(2)}` : '-'
+      render: (p: number | null, r: Position) => p ? `${currencySymbol(r.market)}${p.toFixed(2)}` : '-'
     },
     {
       title: '浮动盈亏', dataIndex: 'profit_loss', key: 'profit_loss', width: 120,
@@ -208,7 +257,7 @@ const Portfolio: React.FC = () => {
         if (profit === null) return '-';
         return (
           <span style={{ color: profit >= 0 ? colors.profit : colors.loss, fontWeight: 'bold' }}>
-            {profit >= 0 ? '+' : ''}${profit.toFixed(2)} ({r.profit_loss_pct?.toFixed(2)}%)
+            {profit >= 0 ? '+' : ''}{currencySymbol(r.market)}{profit.toFixed(2)} ({r.profit_loss_pct?.toFixed(2)}%)
           </span>
         );
       }
@@ -218,17 +267,25 @@ const Portfolio: React.FC = () => {
       render: (d: number | null) => d !== null ? `${d}天` : '-'
     },
     {
-      title: '止损/止盈', key: 'levels', width: 140,
-      render: (_: unknown, r: Position) => (
-        <Space size={4}>
-          <Tag color={r.current_price && r.stop_loss && r.current_price <= r.stop_loss ? 'red' : 'default'}>
-            损{r.stop_loss ? `$${r.stop_loss}` : '-'}
-          </Tag>
-          <Tag color={r.current_price && r.take_profit && r.current_price >= r.take_profit ? 'green' : 'default'}>
-            盈{r.take_profit ? `$${r.take_profit}` : '-'}
-          </Tag>
-        </Space>
-      )
+      title: '止损/止盈与补仓位', key: 'levels', width: 185,
+      render: (_: unknown, r: Position) => {
+        const nextAddPx = (r.buy_price * 0.95).toFixed(2);
+        return (
+          <Space size={4} wrap>
+            <Tag color={r.current_price && r.stop_loss && r.current_price <= r.stop_loss ? 'red' : 'default'}>
+              损{r.stop_loss ? `${currencySymbol(r.market)}${r.stop_loss}` : '-'}
+            </Tag>
+            <Tag color={r.current_price && r.take_profit && r.current_price >= r.take_profit ? 'green' : 'default'}>
+              盈{r.take_profit ? `${currencySymbol(r.market)}${r.take_profit}` : '-'}
+            </Tag>
+            <Tooltip title="按V2仓位方案：较买入均价回撤5%为第一档阶梯补仓位">
+              <Tag color="blue" style={{ fontSize: 11 }}>
+                补{currencySymbol(r.market)}{nextAddPx}
+              </Tag>
+            </Tooltip>
+          </Space>
+        );
+      }
     },
     {
       title: '操作', key: 'action', width: 170,
@@ -254,9 +311,9 @@ const Portfolio: React.FC = () => {
   const historyColumns = [
     { title: '代码', dataIndex: 'stock_code', key: 'stock_code', width: 90 },
     { title: '名称', dataIndex: 'stock_name', key: 'stock_name', width: 110 },
-    { title: '买入价', dataIndex: 'buy_price', key: 'buy_price', width: 90, render: (p: number) => `$${p.toFixed(2)}` },
+    { title: '买入价', dataIndex: 'buy_price', key: 'buy_price', width: 90, render: (p: number, r: Position) => `${currencySymbol(r.market)}${p.toFixed(2)}` },
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 70 },
-    { title: '卖出价', dataIndex: 'sell_price', key: 'sell_price', width: 90, render: (p: number | null) => p ? `$${p.toFixed(2)}` : '-' },
+    { title: '卖出价', dataIndex: 'sell_price', key: 'sell_price', width: 90, render: (p: number | null, r: Position) => p ? `${currencySymbol(r.market)}${p.toFixed(2)}` : '-' },
     { title: '买入日', dataIndex: 'buy_date', key: 'buy_date', width: 100, render: (d: string) => d?.slice(0, 10) },
     { title: '卖出日', dataIndex: 'sell_date', key: 'sell_date', width: 100, render: (d: string | null) => d?.slice(0, 10) || '-' },
     { title: '持有天数', dataIndex: 'holding_days', key: 'hd', width: 80, render: (d: number | null) => d !== null && d !== undefined ? `${d}天` : '-' },
@@ -266,7 +323,7 @@ const Portfolio: React.FC = () => {
         if (pnl === null) return '-';
         return (
           <span style={{ color: pnl >= 0 ? colors.profit : colors.loss, fontWeight: 'bold' }}>
-            {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} ({r.realized_pnl_pct?.toFixed(2)}%)
+            {pnl >= 0 ? '+' : ''}{currencySymbol(r.market)}{pnl.toFixed(2)} ({r.realized_pnl_pct?.toFixed(2)}%)
           </span>
         );
       }
@@ -296,7 +353,7 @@ const Portfolio: React.FC = () => {
             <div>
               {stopAlerts.map(a => (
                 <div key={a.id}>
-                  <b>{a.stock_name}({a.stock_code})</b>：现价${a.current_price} 已跌破止损位${a.stop_loss}
+                  <b>{a.stock_name}({a.stock_code})</b>：现价{currencySymbol(a.market)}{a.current_price} 已跌破止损位{currencySymbol(a.market)}{a.stop_loss}
                   ，当前浮亏{a.profit_loss_pct}% —— 严格执行止损纪律！
                 </div>
               ))}
@@ -314,7 +371,7 @@ const Portfolio: React.FC = () => {
             <div>
               {tpAlerts.map(a => (
                 <div key={a.id}>
-                  <b>{a.stock_name}({a.stock_code})</b>：现价${a.current_price} 已达止盈位${a.take_profit}
+                  <b>{a.stock_name}({a.stock_code})</b>：现价{currencySymbol(a.market)}{a.current_price} 已达止盈位{currencySymbol(a.market)}{a.take_profit}
                   ，当前盈利+{a.profit_loss_pct}% —— 考虑分批止盈落袋
                 </div>
               ))}
@@ -471,7 +528,7 @@ const Portfolio: React.FC = () => {
       <Card
         title="持仓明细"
         extra={
-          <Space>
+          <Space wrap>
             <Tooltip title="设置总资金后启用单票40%上限与现金比例预警">
               <InputNumber
                 prefix={<SettingOutlined />}
@@ -486,6 +543,7 @@ const Portfolio: React.FC = () => {
               />
             </Tooltip>
             <Button onClick={handleSaveCapital} loading={capitalSaving}>保存</Button>
+            <Button icon={<DownloadOutlined />} onClick={handleExportCsv}>导出CSV</Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>添加持仓</Button>
           </Space>
         }
@@ -594,6 +652,66 @@ const Portfolio: React.FC = () => {
           <Form.Item name="buy_date" label="买入日期" rules={[{ required: true, message: '请选择买入日期' }]}>
             <DatePicker style={{ width: '100%' }} />
           </Form.Item>
+          <div style={{ marginBottom: 12 }}>
+            <Space size="small" wrap>
+              <span style={{ fontSize: 12, color: colors.textSecondary }}>⚡ 快捷策略与仓位：</span>
+              <Button
+                size="small"
+                onClick={() => {
+                  const bp = Number(form.getFieldValue('buy_price'));
+                  if (!bp || bp <= 0) {
+                    message.warning('请先填写买入价格');
+                    return;
+                  }
+                  form.setFieldsValue({
+                    stop_loss: Number((bp * 0.92).toFixed(2)),
+                    take_profit: Number((bp * 1.15).toFixed(2)),
+                  });
+                }}
+              >
+                按线性策略 (-8%损/+15%盈)
+              </Button>
+              <Button
+                size="small"
+                onClick={() => {
+                  const bp = Number(form.getFieldValue('buy_price'));
+                  if (!bp || bp <= 0) {
+                    message.warning('请先填写买入价格');
+                    return;
+                  }
+                  form.setFieldsValue({
+                    stop_loss: Number((bp * 0.92).toFixed(2)),
+                    take_profit: Number((bp * 1.46).toFixed(2)),
+                  });
+                }}
+              >
+                按非线性策略 (-8%损/+46%盈)
+              </Button>
+              <Button
+                size="small"
+                type="dashed"
+                onClick={() => {
+                  const bp = Number(form.getFieldValue('buy_price'));
+                  if (!bp || bp <= 0) {
+                    message.warning('请先填写买入价格');
+                    return;
+                  }
+                  const sl = Number(form.getFieldValue('stop_loss')) || Number((bp * 0.92).toFixed(2));
+                  const cap = capitalInput && capitalInput > 0 ? capitalInput : 100000;
+                  const ps = calcPositionSize(cap, bp, sl);
+                  if (ps.recommendedShares > 0) {
+                    form.setFieldsValue({
+                      quantity: ps.recommendedShares,
+                      stop_loss: sl,
+                    });
+                    message.success(`按总资金 $${cap.toLocaleString()} 的 2% 定额风险法则，建议建仓 ${ps.recommendedShares} 股（首仓可先入 ${ps.firstTrancheShares} 股）`);
+                  }
+                }}
+              >
+                🧮 2%风控算仓位
+              </Button>
+            </Space>
+          </div>
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item

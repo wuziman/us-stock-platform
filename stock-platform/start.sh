@@ -2,25 +2,24 @@
 
 echo "================================"
 echo "  量化交易平台启动脚本"
+echo "  (首次运行请先执行 ./install.sh)"
 echo "================================"
 
 # 启动后端
 echo ""
 echo "[1/2] 启动后端服务..."
 cd backend
-pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 &
 BACKEND_PID=$!
 
 # 等待后端启动
 echo "等待后端启动..."
-sleep 5
+sleep 3
 
 # 启动前端
 echo ""
 echo "[2/2] 启动前端服务..."
 cd ../frontend
-npm install
 npm run dev &
 FRONTEND_PID=$!
 

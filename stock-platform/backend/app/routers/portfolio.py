@@ -1,19 +1,20 @@
 """
 持仓相关API
 - 当前持仓 / 卖出 / 历史交易
-- 总资金设置（仓位集中度预警用）
+- 总资金设置（仓位集中度预警用，支持A股/美股跨市场汇率折算）
+- 2%定额风险法则与半凯利公式科学建仓计算器（打通 risk/position_sizing.py 逻辑）
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy.orm import Session
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from ..database import get_db
 from ..models import Position, Setting
 from ..models_platform import PortfolioSnapshot
 from ..schemas import PositionCreate, PositionSell, PositionUpdate, PositionResponse
-from ..services.alert_service import compute_drawdown_stats
+from ..services.alert_service import compute_drawdown_stats, DEFAULT_USD_CNY_RATE
 from ..services.stock_service import StockService
 from ..utils.market import detect_market
 
@@ -24,6 +25,85 @@ stock_service = StockService()
 MAX_SINGLE_POSITION_PCT = 40.0   # 单只股票最大仓位40%
 CASH_MIN_PCT = 15.0              # 现金保留下限15%
 CASH_MAX_PCT = 25.0              # 现金保留上限25%
+DEFAULT_RISK_PER_TRADE = 0.02    # 单笔最大风险占总资金2%（risk/position_sizing.py）
+
+
+def calculate_recommended_position(
+    capital: float,
+    buy_price: float,
+    stop_loss: Optional[float] = None,
+    risk_per_trade: float = DEFAULT_RISK_PER_TRADE,
+    max_position_pct: float = MAX_SINGLE_POSITION_PCT / 100.0,
+    win_rate: Optional[float] = None,
+    reward_risk_ratio: float = 1.875,
+) -> Dict:
+    """
+    基于2%定额风险法则与半凯利公式（Half-Kelly）计算建议建仓股数与分批方案（纯函数，便于单测）。
+
+    参数:
+        capital: 总资金（若<=0则按默认$100,000估算）
+        buy_price: 计划买入价格
+        stop_loss: 止损价格（未提供或>=buy_price时默认按-8%纪律止损计算）
+        risk_per_trade: 单笔最大可承受亏损占总资金比例（默认2%）
+        max_position_pct: 单只股票最大仓位上限（默认40%）
+        win_rate: 可选历史胜率（0~1或0~100），用于计算半凯利建议仓位比例
+        reward_risk_ratio: 盈亏比（默认线性策略 15%/8% = 1.875）
+    """
+    eff_capital = float(capital) if capital and capital > 0 else 100000.0
+    if not buy_price or buy_price <= 0:
+        return {
+            'capital': round(eff_capital, 2),
+            'buy_price': 0.0,
+            'stop_loss': 0.0,
+            'risk_per_trade_pct': round(risk_per_trade * 100, 2),
+            'max_loss_amount': 0.0,
+            'recommended_shares': 0,
+            'position_value': 0.0,
+            'position_pct': 0.0,
+            'first_tranche_shares': 0,
+            'add_price_1': 0.0,
+            'capped_by_40pct': False,
+            'half_kelly_pct': None,
+        }
+
+    eff_stop = (
+        float(stop_loss)
+        if (stop_loss is not None and 0 < stop_loss < buy_price)
+        else round(buy_price * 0.92, 2)
+    )
+    risk_amount = eff_capital * risk_per_trade
+    per_share_risk = abs(buy_price - eff_stop)
+    risk_shares = int(risk_amount // per_share_risk) if per_share_risk > 0 else 0
+
+    max_pos_value = eff_capital * max_position_pct
+    max_shares_by_cap = int(max_pos_value // buy_price)
+    capped = risk_shares > max_shares_by_cap
+    shares = max(0, min(risk_shares, max_shares_by_cap))
+    pos_value = round(shares * buy_price, 2)
+    pos_pct = round(pos_value / eff_capital * 100, 2) if eff_capital > 0 else 0.0
+
+    # 半凯利公式参考仓位比例
+    half_kelly_pct = None
+    if win_rate is not None and reward_risk_ratio > 0:
+        w = win_rate / 100.0 if win_rate > 1.0 else float(win_rate)
+        w = max(0.0, min(1.0, w))
+        kelly = (w * reward_risk_ratio - (1.0 - w)) / reward_risk_ratio
+        half_kelly_pct = round(max(0.0, min(max_position_pct, kelly * 0.5)) * 100, 1)
+
+    return {
+        'capital': round(eff_capital, 2),
+        'buy_price': round(buy_price, 2),
+        'stop_loss': round(eff_stop, 2),
+        'risk_per_trade_pct': round(risk_per_trade * 100, 2),
+        'max_loss_amount': round(shares * per_share_risk, 2),
+        'recommended_shares': shares,
+        'position_value': pos_value,
+        'position_pct': pos_pct,
+        'first_tranche_shares': max(0, shares // 2),
+        'add_price_1': round(buy_price * 0.95, 2),
+        'capped_by_40pct': capped,
+        'half_kelly_pct': half_kelly_pct,
+    }
 
 
 def _get_total_capital(db: Session) -> float:
@@ -35,6 +115,16 @@ def _get_total_capital(db: Session) -> float:
         return 0.0
 
 
+def _get_usd_cny_rate(db: Session) -> float:
+    """读取美元兑人民币汇率设置（跨市场混合持仓折算用），默认7.2"""
+    row = db.query(Setting).filter(Setting.key == "usd_cny_rate").first()
+    try:
+        val = float(row.value) if row else DEFAULT_USD_CNY_RATE
+        return val if val > 0 else DEFAULT_USD_CNY_RATE
+    except (TypeError, ValueError):
+        return DEFAULT_USD_CNY_RATE
+
+
 def _realized_pnl(sell_price: float, buy_price: float, quantity: float) -> Tuple[float, float]:
     """已实现盈亏与百分比（卖出接口与单测共用同一实现）"""
     pnl = (sell_price - buy_price) * quantity
@@ -44,11 +134,33 @@ def _realized_pnl(sell_price: float, buy_price: float, quantity: float) -> Tuple
 
 def _fetch_quotes(positions: List[Position]) -> list:
     """并行拉取全部持仓实时行情（美股 yfinance .info 单次秒级，串行会随持仓数线性放大）"""
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    if not positions:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(positions))) as executor:
         return list(executor.map(
             lambda p: stock_service.get_realtime_quote(p.stock_code, detect_market(p.stock_code)),
             positions
         ))
+
+
+@router.get("/position-size")
+def get_position_size(
+    buy_price: float = Query(..., gt=0),
+    stop_loss: Optional[float] = Query(None),
+    total_capital: Optional[float] = Query(None),
+    risk_per_trade: float = Query(DEFAULT_RISK_PER_TRADE, gt=0, le=0.2),
+    win_rate: Optional[float] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """基于2%定额风险法则与单票40%上限计算科学建仓股数与首仓/补仓方案"""
+    cap = total_capital if (total_capital is not None and total_capital > 0) else _get_total_capital(db)
+    return calculate_recommended_position(
+        capital=cap,
+        buy_price=buy_price,
+        stop_loss=stop_loss,
+        risk_per_trade=risk_per_trade,
+        win_rate=win_rate,
+    )
 
 
 @router.get("", response_model=List[PositionResponse])
@@ -64,7 +176,6 @@ def _enrich_holding(pos: Position, quote) -> PositionResponse:
     profit_loss = (current_price - pos.buy_price) * pos.quantity
     profit_loss_pct = (current_price - pos.buy_price) / pos.buy_price * 100 if pos.buy_price else 0
 
-    # 距止损/止盈的距离（百分比），供前端预警
     days_held = max((datetime.now() - pos.buy_date).days, 0)
 
     return PositionResponse(
@@ -156,7 +267,7 @@ async def add_position(position: PositionCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="止盈位应高于买入价")
 
     data = position.model_dump()
-    # 市场判定后端单点：忽略客户端传值（此前前端用首字符正则复刻，BRK.B 类代码会误判）
+    # 市场判定后端单点：忽略客户端传值
     data['market'] = detect_market(position.stock_code)
     db_position = Position(**data)
     db.add(db_position)
@@ -196,7 +307,6 @@ async def update_position(position_id: int, update: PositionUpdate,
         position.quantity = update.quantity
     if update.buy_date is not None:
         position.buy_date = update.buy_date
-    # 止损止盈：区分"未传"（保持不变）与"显式null"（清除）
     for field in ("stop_loss", "take_profit"):
         if field in update.model_fields_set:
             setattr(position, field, getattr(update, field))
@@ -240,8 +350,12 @@ async def set_total_capital(total_capital: float, db: Session = Depends(get_db))
 
 @router.get("/summary")
 def get_portfolio_summary(db: Session = Depends(get_db)):
-    """持仓汇总 + 仓位集中度检查"""
+    """持仓汇总 + 仓位集中度检查（当同时持有A股与美股时，自动将A股人民币市值按汇率折算为美元汇总，避免跨币种1:1直接相加失真；若仅持有A股则保持人民币原值）"""
     positions = db.query(Position).filter(Position.status == "holding").all()
+
+    markets_held = {p.market or detect_market(p.stock_code) for p in positions}
+    has_mixed_currencies = ('A' in markets_held and 'US' in markets_held)
+    fx_rate = _get_usd_cny_rate(db) if has_mixed_currencies else 1.0
 
     total_value = 0.0
     total_cost = 0.0
@@ -249,10 +363,14 @@ def get_portfolio_summary(db: Session = Depends(get_db)):
 
     quotes = _fetch_quotes(positions)
     for pos, quote in zip(positions, quotes):
+        mkt = pos.market or detect_market(pos.stock_code)
+        # 若为美股+A股混合持仓，将A股(CNY)除以fx_rate折算为USD统一口径
+        scale = (1.0 / fx_rate) if (has_mixed_currencies and mkt == 'A') else 1.0
         current_price = (quote or {}).get('price') or pos.buy_price
-        value = current_price * pos.quantity
+        value = current_price * pos.quantity * scale
+        cost = pos.buy_price * pos.quantity * scale
         total_value += value
-        total_cost += pos.buy_price * pos.quantity
+        total_cost += cost
         per_stock_value[pos.stock_code] = per_stock_value.get(pos.stock_code, 0) + value
 
     total_profit = total_value - total_cost

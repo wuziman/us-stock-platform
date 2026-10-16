@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-价格监控纯函数测试：回撤统计 / 市场时段判定 / 财报日期挑选
+价格监控纯函数测试：回撤统计 / 市场时段判定（含法定休市节假日过滤） / 财报日期挑选
 全部合成数据，不依赖网络与数据库。
 运行：cd backend && python -m pytest tests/test_alert_service.py -v
 """
@@ -14,7 +14,7 @@ import pytz
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.alert_service import compute_drawdown_stats, is_market_open
+from app.services.alert_service import compute_drawdown_stats, is_market_open, is_trading_holiday
 from app.routers.stocks import pick_next_earnings_date
 
 
@@ -79,6 +79,16 @@ class TestIsMarketOpen:
         assert is_market_open('A', SH_TZ.localize(wed.replace(hour=14, minute=59))) is True
         assert is_market_open('A', SH_TZ.localize(wed.replace(hour=15, minute=1))) is False
         assert is_market_open('A', SH_TZ.localize(datetime(2026, 8, 30, 10, 0))) is False  # 周日
+
+    def test_holidays_closed_even_on_weekdays(self):
+        # 2026-12-25 周五圣诞节：美股休市
+        assert is_trading_holiday('US', date(2026, 12, 25)) is True
+        assert is_market_open('US', SH_TZ.localize(datetime(2026, 12, 25, 23, 0))) is False
+        # 2026-07-03 周五（7月4日独立日落周六，美股周五补休）
+        assert is_trading_holiday('US', date(2026, 7, 3)) is True
+        # 2026-10-01 周四国庆节：A股休市
+        assert is_trading_holiday('A', date(2026, 10, 1)) is True
+        assert is_market_open('A', SH_TZ.localize(datetime(2026, 10, 1, 10, 30))) is False
 
 
 # ============================================

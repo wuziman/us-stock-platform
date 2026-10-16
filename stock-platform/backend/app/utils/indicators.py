@@ -2,12 +2,13 @@
 技术指标计算
 """
 
+import numpy as np
 import pandas as pd
 
 
 def calculate_rsi(data: pd.Series, period: int = 14) -> pd.Series:
     """
-    计算RSI（相对强弱指标）
+    计算RSI（相对强弱指标），含除零保护（连涨14日loss=0时返回100，横盘gain=loss=0时返回50）
 
     参数：
         data: 价格序列
@@ -19,9 +20,11 @@ def calculate_rsi(data: pd.Series, period: int = 14) -> pd.Series:
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    rs = gain / loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    return rsi
+    # 当 loss == 0 且 gain > 0 时 RSI = 100；当 gain == 0 且 loss == 0 时 RSI = 50
+    rsi = np.where((loss == 0) & (gain > 0), 100.0, np.where((loss == 0) & (gain == 0), 50.0, rsi))
+    return pd.Series(rsi, index=data.index)
 
 
 def calculate_macd(data: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:

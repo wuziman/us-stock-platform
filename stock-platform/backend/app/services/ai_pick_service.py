@@ -1,11 +1,12 @@
 """
 AI选股服务（仅美股）：Serenity供应链卡点思维
-流程：候选池行情/新闻简报 + 小红书博主观点 → LLM按卡点框架分析 → 结构化选股结果入库
+流程：候选池行情/新闻简报（多线程并行拉取） + 小红书博主观点 → LLM按卡点框架分析 → 结构化选股结果入库
 另提供小红书博主帖子AI总结（generate_xhs_summaries），供用户快速浏览各博主观点。
 
 LLM通过 llm_client 调OpenAI兼容接口（OpenRouter等），供应商在config.json配置。
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import re
@@ -181,12 +182,13 @@ def get_universe() -> List[tuple]:
 
 
 def run_ai_pick() -> Dict:
-    """完整选股流水线：简报→小红书→LLM→解析→入库。任何环节失败抛异常由路由转HTTP错误"""
+    """完整选股流水线：并发拉取简报→小红书→LLM→解析→入库。任何环节失败抛异常由路由转HTTP错误"""
     if not is_ai_configured():
         raise RuntimeError('AI供应商未配置：请先在config/config.json填写ai_provider')
 
     universe = get_universe()
-    briefs = [_stock_brief(c, n) for c, n in universe]
+    with ThreadPoolExecutor(max_workers=min(8, max(len(universe), 1))) as executor:
+        briefs = list(executor.map(lambda pair: _stock_brief(pair[0], pair[1]), universe))
     xhs_digest = xhs_service.digest_recent()
 
     messages = build_selection_messages(briefs, xhs_digest)

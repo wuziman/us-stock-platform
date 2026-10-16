@@ -1,6 +1,6 @@
 """
 定时任务服务
-- APScheduler后台调度：每30分钟检查一次是否到达日报推送窗口
+- APScheduler后台调度：每30分钟检查一次是否到达日报推送窗口，并顺带清理超过24小时的陈旧K线缓存
 - 防重复发送：Setting.last_sent_date 记录当日已推送
 - 防开发期误发：schedule_enabled 默认false，需在页面显式开启
 """
@@ -16,6 +16,7 @@ from ..database import SessionLocal
 from ..models import Watchlist, Setting
 from .report_service import ReportService
 from .alert_service import run_price_monitor
+from .stock_service import cleanup_expired_kline_cache
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +119,9 @@ def run_now() -> Dict:
 
 
 def scheduled_job():
-    """APScheduler每30分钟触发：到达推送窗口且今日未发时执行"""
+    """APScheduler每30分钟触发：顺带清理过期K线缓存，到达推送窗口且今日未发时执行日报"""
     try:
+        cleanup_expired_kline_cache(max_age_hours=24)
         now = datetime.now()
         db = SessionLocal()
         try:

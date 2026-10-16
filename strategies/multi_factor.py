@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.indicators import calculate_rsi, calculate_sma, calculate_atr
 
 
@@ -39,28 +39,30 @@ class MultiFactorStrategy:
         factors['Volatility_Score'] = 1 / (factors['Volatility'] + 0.001)
 
         # 4. 成交量动量
-        factors['Volume_Momentum'] = df['Volume'].rolling(20).mean() / df['Volume'].rolling(60).mean()
+        vol_60 = df['Volume'].rolling(60).mean().replace(0, np.nan)
+        factors['Volume_Momentum'] = df['Volume'].rolling(20).mean() / vol_60
 
         # 5. RSI因子
         factors['RSI'] = calculate_rsi(df, 14)
         factors['RSI_Score'] = 1 - abs(factors['RSI'] - 50) / 50
 
         # 6. 趋势强度 (价格相对于20日均线的位置)
-        sma_20 = calculate_sma(df, 20)
+        sma_20 = calculate_sma(df, 20).replace(0, np.nan)
         factors['Trend_Strength'] = (df['Close'] - sma_20) / sma_20
 
         return factors
 
     def normalize_factors(self, factors: pd.DataFrame) -> pd.DataFrame:
-        """因子标准化（Z-score）"""
+        """因子标准化（滚动窗口 Z-score，避免全样本未来函数）"""
         normalized = factors.copy()
         for col in factors.columns:
-            mean = factors[col].mean()
-            std = factors[col].std()
-            if std > 0:
-                normalized[col] = (factors[col] - mean) / std
-            else:
-                normalized[col] = 0
+            rolling_mean = factors[col].expanding(min_periods=20).mean()
+            rolling_std = factors[col].expanding(min_periods=20).std()
+            normalized[col] = np.where(
+                rolling_std > 0,
+                (factors[col] - rolling_mean) / rolling_std,
+                0.0
+            )
         return normalized
 
     def calculate_composite_score(
@@ -188,9 +190,9 @@ class MultiStockSelector:
 
         # 趋势 (权重30%)
         sma_20 = df['Close'].rolling(20).mean().iloc[-1] if len(df) > 20 else df['Close'].iloc[-1]
-        trend_score = ((df['Close'].iloc[-1] / sma_20) - 1) * 0.3
+        trend_score = ((df['Close'].iloc[-1] / sma_20) - 1) * 0.3 if sma_20 else 0
 
-        return momentum_score + vol_score + trend_score
+        return float(momentum_score + vol_score + trend_score)
 
     def select_portfolio(
         self,
@@ -216,28 +218,30 @@ class MultiStockSelector:
         top_stocks = rankings.head(self.n_stocks)
 
         if allocation_method == 'equal':
-            # 等权重
-            weights = {row['Symbol']: 1/len(top_stocks) for _, row in top_stocks.iterrows()}
+            weights = {row['Symbol']: 1 / len(top_stocks) for _, row in top_stocks.iterrows()}
 
         elif allocation_method == 'momentum':
-            # 按动量加权
-            total_momentum = top_stocks['Momentum_20'].sum()
+            # 仅对正动量按比例加权，避免负动量产生负权重
+            pos_mom = top_stocks['Momentum_20'].clip(lower=0)
+            total_momentum = pos_mom.sum()
             if total_momentum > 0:
-                weights = {row['Symbol']: row['Momentum_20']/total_momentum
-                          for _, row in top_stocks.iterrows()}
+                weights = {
+                    row['Symbol']: float( max(0.0, row['Momentum_20']) / total_momentum )
+                    for _, row in top_stocks.iterrows()
+                }
             else:
-                weights = {row['Symbol']: 1/len(top_stocks)
-                          for _, row in top_stocks.iterrows()}
+                weights = {row['Symbol']: 1 / len(top_stocks) for _, row in top_stocks.iterrows()}
 
         elif allocation_method == 'risk_parity':
-            # 风险平价
             inv_vol = 1 / (top_stocks['Volatility'] + 0.001)
             total_inv_vol = inv_vol.sum()
-            weights = {row['Symbol']: inv_vol.iloc[i]/total_inv_vol
-                      for i, (_, row) in enumerate(top_stocks.iterrows())}
+            weights = {
+                row['Symbol']: float(inv_vol.iloc[i] / total_inv_vol)
+                for i, (_, row) in enumerate(top_stocks.iterrows())
+            }
 
         else:
-            weights = {row['Symbol']: 1/len(top_stocks) for _, row in top_stocks.iterrows()}
+            weights = {row['Symbol']: 1 / len(top_stocks) for _, row in top_stocks.iterrows()}
 
         return weights
 
@@ -245,7 +249,7 @@ class MultiStockSelector:
 class CombinedStrategy:
     """
     组合策略
-    结合趋势跟踪和多因子选股
+    结合趋势跟踪和多因子选股（修复建仓不扣减现金导致净值翻倍及全样本未来函数问题）
     """
 
     def __init__(self, initial_capital: float = 100000):
@@ -261,15 +265,8 @@ class CombinedStrategy:
         factor_weight: float = 0.4
     ) -> Tuple[pd.DataFrame, Dict]:
         """
-        组合回测
-
-        参数:
-            data_dict: {symbol: DataFrame}
-            rebalance_period: 再平衡周期
-            trend_weight: 趋势策略权重
-            factor_weight: 因子策略权重
+        组合回测（真实持仓股数与现金闭环核算，无未来函数）
         """
-        # 获取所有日期
         all_dates = set()
         for df in data_dict.values():
             all_dates.update(df.index)
@@ -278,68 +275,87 @@ class CombinedStrategy:
         if not all_dates:
             return pd.DataFrame(), {}
 
-        # 初始化结果
         results = pd.DataFrame(index=all_dates)
-        results['Capital'] = self.initial_capital
-        results['Total'] = self.initial_capital
+        results['Capital'] = float(self.initial_capital)
+        results['Total'] = float(self.initial_capital)
         results['Positions'] = ''
 
-        capital = self.initial_capital
-        current_positions = {}
+        cash = float(self.initial_capital)
+        holdings_shares: Dict[str, float] = {}   # {symbol: shares}
+        last_prices: Dict[str, float] = {}       # {symbol: last_known_close}
 
-        for i, date in enumerate(all_dates):
-            # 检查是否需要再平衡
-            if i % rebalance_period == 0 and i > 0:
-                # 选股
+        for i, dt in enumerate(all_dates):
+            # 更新当日最新已知收盘价
+            for symbol, df in data_dict.items():
+                if dt in df.index:
+                    last_prices[symbol] = float(df.loc[dt, 'Close'])
+
+            # 计算调仓前当前账户总权益 = 现金 + 持仓市值
+            portfolio_equity = cash + sum(
+                shares * last_prices.get(sym, 0.0)
+                for sym, shares in holdings_shares.items()
+            )
+
+            # 到期再平衡（仅截取截至当日 dt 的历史数据选股，彻底消除未来函数）
+            if i >= 60 and i % rebalance_period == 0:
+                hist_slice = {
+                    sym: df.loc[df.index <= dt]
+                    for sym, df in data_dict.items()
+                }
                 selector = MultiStockSelector(n_stocks=5)
-                weights = selector.select_portfolio(data_dict, 'momentum')
+                weights = selector.select_portfolio(hist_slice, 'momentum')
 
-                # 更新仓位
-                current_positions = weights
+                if weights:
+                    # 先按当日收盘价全部清仓回笼为现金，再按目标权重重新建仓并扣减现金
+                    cash = portfolio_equity
+                    holdings_shares = {}
+                    for sym, weight in weights.items():
+                        price = last_prices.get(sym, 0.0)
+                        if price > 0 and weight > 0:
+                            alloc_amount = portfolio_equity * weight
+                            shares = alloc_amount / price
+                            holdings_shares[sym] = shares
+                            cash -= alloc_amount
 
-            # 计算当日价值
-            total_value = capital
-            position_str = []
+            # 重新计算当日收盘后总权益與持仓占比字符串
+            holdings_val = sum(
+                shares * last_prices.get(sym, 0.0)
+                for sym, shares in holdings_shares.items()
+            )
+            total_value = cash + holdings_val
+            position_str = [
+                f"{sym}:{(shares * last_prices.get(sym, 0.0) / total_value):.1%}"
+                for sym, shares in holdings_shares.items()
+                if total_value > 0
+            ]
 
-            for symbol, weight in current_positions.items():
-                if symbol in data_dict and date in data_dict[symbol].index:
-                    price = data_dict[symbol].loc[date, 'Close']
-                    position_value = capital * weight
-                    shares = position_value / price
-                    total_value += position_value
-                    position_str.append(f"{symbol}:{weight:.1%}")
+            results.loc[dt, 'Capital'] = round(cash, 2)
+            results.loc[dt, 'Total'] = round(total_value, 2)
+            results.loc[dt, 'Positions'] = ','.join(position_str)
 
-            results.loc[date, 'Capital'] = capital
-            results.loc[date, 'Total'] = total_value
-            results.loc[date, 'Positions'] = ','.join(position_str)
-
-        # 计算统计
         stats = self._calculate_stats(results)
-
         return results, stats
 
     def _calculate_stats(self, df: pd.DataFrame) -> Dict:
         """计算统计"""
-        final_value = df['Total'].iloc[-1]
+        final_value = float(df['Total'].iloc[-1])
         total_return = (final_value - self.initial_capital) / self.initial_capital
         years = len(df) / 252
-        annual_return = (1 + total_return) ** (1/years) - 1 if years > 0 else 0
+        annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
 
-        # 最大回撤
         peak = df['Total'].expanding(min_periods=1).max()
         drawdown = (df['Total'] - peak) / peak
-        max_drawdown = drawdown.min()
+        max_drawdown = float(drawdown.min())
 
-        # 夏普比率
         daily_returns = df['Total'].pct_change().dropna()
-        if daily_returns.std() > 0:
-            sharpe_ratio = np.sqrt(252) * (daily_returns.mean() / daily_returns.std())
+        if len(daily_returns) > 1 and daily_returns.std() > 0:
+            sharpe_ratio = float(np.sqrt(252) * (daily_returns.mean() / daily_returns.std()))
         else:
-            sharpe_ratio = 0
+            sharpe_ratio = 0.0
 
         return {
-            'total_return': total_return,
-            'annual_return': annual_return,
+            'total_return': float(total_return),
+            'annual_return': float(annual_return),
             'max_drawdown': max_drawdown,
             'sharpe_ratio': sharpe_ratio,
             'final_value': final_value
@@ -349,12 +365,10 @@ class CombinedStrategy:
 if __name__ == "__main__":
     from utils.data_fetcher import fetch_multiple_stocks
 
-    # 获取多只股票数据
     symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA']
     data_dict = fetch_multiple_stocks(symbols, period="1y")
 
     if data_dict:
-        # 测试多股票选择
         selector = MultiStockSelector(n_stocks=3)
         weights = selector.select_portfolio(data_dict, 'momentum')
 

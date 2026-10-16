@@ -90,6 +90,7 @@ cython_debug/
 
 # Data files
 *.xlsx
+!*_data.xlsx
 *.xls
 *.csv
 
@@ -119,3 +120,6 @@ Thumbs.db
 .env
 .env.*
 *.key
+
+# Claude local settings
+.claude/settings.local.json

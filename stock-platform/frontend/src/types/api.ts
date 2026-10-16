@@ -19,6 +19,25 @@ export interface KlineBar {
   bb_upper: number | null;
   bb_mid: number | null;
   bb_lower: number | null;
+  rsi?: number | null;
+  macd?: number | null;
+  macd_signal?: number | null;
+  macd_hist?: number | null;
+}
+
+export interface PositionSizeInfo {
+  capital: number;
+  buy_price: number;
+  stop_loss: number;
+  risk_per_trade_pct: number;
+  max_loss_amount: number;
+  recommended_shares: number;
+  position_value: number;
+  position_pct: number;
+  first_tranche_shares: number;
+  add_price_1: number;
+  capped_by_40pct: boolean;
+  half_kelly_pct?: number | null;
 }
 
 // ===== 股票 / 自选股 =====
@@ -174,6 +193,7 @@ export interface AnalysisResult {
   earnings_radar?: EarningsRadar;
   price_levels: {
     current_price: number | null;
+    atr?: number | null;
     linear: PriceLevels;
     nonlinear: PriceLevels;
     macd?: {
@@ -194,6 +214,10 @@ export interface PriceLevels {
   stop: number | null;
   profit: number | null;
   distance: number | null;
+  atr_stop?: number | null;
+  atr_profit?: number | null;
+  breakeven_trigger?: number | null;
+  breakeven_stop?: number | null;
 }
 
 export interface HistoryItem {
@@ -368,6 +392,8 @@ export interface PickRecord {
   catalysts: string;
   market_commentary: string;
   price_at_pick: number | null;
+  current_price?: number | null;
+  return_pct?: number | null;
 }
 
 export interface StatusInfo {
@@ -410,6 +436,12 @@ export interface WeeklyAlphaItem {
   nonlinear_buy: number;
   linear_profit: number;
   linear_stop: number;
+  forward_pe?: number | null;
+  rev_growth_pct?: number | null;
+  target_price?: number | null;
+  upside_pct?: number | null;
+  atr_stop?: number;
+  breakeven_trigger?: number;
 }
 
 export interface WeeklyAlphaResponse {

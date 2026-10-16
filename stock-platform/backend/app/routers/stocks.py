@@ -49,7 +49,7 @@ def get_quote(code: str, market: str = "US"):
 
 @router.get("/{code}/history")
 def get_history(code: str, market: str = "US", period: str = "3mo"):
-    """获取历史数据（含MA均线与布林带指标，供前端K线叠加）"""
+    """获取历史数据（含MA均线、布林带、RSI与MACD指标，供前端多周期K线与副图叠加）"""
     df = stock_service.get_stock_data(code, market, period)
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail="无法获取数据")
@@ -76,6 +76,10 @@ def get_history(code: str, market: str = "US", period: str = "3mo"):
             'bb_upper': _num(row.get('BB_Upper')),
             'bb_mid': _num(row.get('BB_Middle')),
             'bb_lower': _num(row.get('BB_Lower')),
+            'rsi': _num(row.get('RSI'), 2),
+            'macd': _num(row.get('MACD'), 3),
+            'macd_signal': _num(row.get('MACD_Signal'), 3),
+            'macd_hist': _num(row.get('MACD_Hist'), 3),
         })
 
     return {"data": data}
@@ -121,23 +125,31 @@ def get_market_regime():
     vix_val = 15.0
     qqq_change = 0.0
 
-    try:
+    def _fetch_vix():
         vix_t = yf.Ticker("^VIX")
         v_hist = vix_t.history(period="5d")
-        if not v_hist.empty:
-            vix_val = float(v_hist['Close'].iloc[-1])
-    except Exception:
-        pass
+        return float(v_hist['Close'].iloc[-1]) if not v_hist.empty else 15.0
 
-    try:
+    def _fetch_qqq():
         qqq_t = yf.Ticker("QQQ")
         q_hist = qqq_t.history(period="5d")
         if len(q_hist) >= 2:
             prev = float(q_hist['Close'].iloc[-2])
             curr = float(q_hist['Close'].iloc[-1])
-            qqq_change = (curr - prev) / prev * 100.0
-    except Exception:
-        pass
+            return (curr - prev) / prev * 100.0
+        return 0.0
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_vix = executor.submit(_fetch_vix)
+        f_qqq = executor.submit(_fetch_qqq)
+        try:
+            vix_val = f_vix.result(timeout=8)
+        except Exception:
+            pass
+        try:
+            qqq_change = f_qqq.result(timeout=8)
+        except Exception:
+            pass
 
     if vix_val >= 28.0 or qqq_change <= -2.5:
         status = "CIRCUIT_BREAKER"
@@ -163,13 +175,14 @@ def get_market_regime():
 
 @router.get("/earnings-calendar")
 def get_earnings_calendar(db: Session = Depends(get_db)):
-    """自选股财报日历：美股走yfinance日历；A股尝试.SZ/.SS后缀，拿不到则日期为空"""
+    """自选股财报日历（并行拉取）：美股走yfinance日历；A股尝试.SZ/.SS后缀，拿不到则日期为空"""
     watchlist = db.query(Watchlist).order_by(Watchlist.created_at.desc()).all()
+    if not watchlist:
+        return {'items': [], 'no_data': []}
+
     today = date.today()
 
-    upcoming = []
-    no_data = []
-    for w in watchlist:
+    def _fetch_one_calendar(w):
         symbol = w.stock_code
         if (w.market or 'US') == 'A':
             code = w.stock_code.replace('.SH', '').replace('.SZ', '')
@@ -187,7 +200,6 @@ def get_earnings_calendar(db: Session = Depends(get_db)):
             if isinstance(cal, dict):
                 candidates = cal.get('Earnings Date')
             elif cal is not None and hasattr(cal, 'to_dict'):
-                # 旧版yfinance返回DataFrame
                 candidates = cal.to_dict().get('Earnings Date')
             nxt = pick_next_earnings_date(candidates, today)
             if nxt:
@@ -195,11 +207,18 @@ def get_earnings_calendar(db: Session = Depends(get_db)):
                 entry['days_away'] = (nxt - today).days
         except Exception as e:
             print(f"财报日历获取失败 {w.stock_code}: {e}")
+        return entry
 
+    with ThreadPoolExecutor(max_workers=min(8, len(watchlist))) as executor:
+        entries = list(executor.map(_fetch_one_calendar, watchlist))
+
+    upcoming = []
+    no_data = []
+    for entry in entries:
         if entry['earnings_date']:
             upcoming.append(entry)
         else:
-            no_data.append({'stock_code': w.stock_code, 'stock_name': w.stock_name})
+            no_data.append({'stock_code': entry['stock_code'], 'stock_name': entry['stock_name']})
 
     upcoming.sort(key=lambda x: x['earnings_date'])
     return {'items': upcoming, 'no_data': no_data}
@@ -216,7 +235,9 @@ def get_watchlist_quotes(db: Session = Depends(get_db)):
     """自选股实时行情（并行拉取），供首页驾驶舱表格填充现价/涨跌。
     独立端点：列表本身保持秒开，行情由前端渐进填充"""
     watchlist = db.query(Watchlist).order_by(Watchlist.created_at.desc()).all()
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    if not watchlist:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(watchlist))) as executor:
         quotes = list(executor.map(
             lambda w: stock_service.get_realtime_quote(w.stock_code, w.market or 'US'),
             watchlist
@@ -234,7 +255,6 @@ def get_watchlist_quotes(db: Session = Depends(get_db)):
 @router.post("/watchlist", response_model=WatchlistResponse)
 async def add_to_watchlist(item: WatchlistCreate, db: Session = Depends(get_db)):
     """添加到自选股"""
-    # 检查是否已存在
     existing = db.query(Watchlist).filter(
         Watchlist.stock_code == item.stock_code,
         Watchlist.market == item.market

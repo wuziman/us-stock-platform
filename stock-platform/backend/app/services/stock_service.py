@@ -170,6 +170,27 @@ def clear_kline_cache() -> int:
         db.close()
 
 
+def cleanup_expired_kline_cache(max_age_hours: int = 24) -> int:
+    """自动清理超过 max_age_hours 小时的陈旧K线缓存记录，控制SQLite体积膨胀"""
+    cutoff = datetime.now() - timedelta(hours=max_age_hours)
+    db = SessionLocal()
+    try:
+        rows = db.query(KlineCache).all()
+        removed = 0
+        for row in rows:
+            if row.fetched_at and row.fetched_at < cutoff:
+                db.delete(row)
+                removed += 1
+        if removed > 0:
+            db.commit()
+        return removed
+    except Exception as e:
+        print(f"清理过期K线缓存失败(忽略): {e}")
+        return 0
+    finally:
+        db.close()
+
+
 def _fetch_kline_eastmoney(code: str, period: str) -> Optional[pd.DataFrame]:
     """东方财富前复权日K（免费公开接口）：数字镜像子域直连（push2his主域被
     本机Clash代理拦截直连必断），镜像不可用时回退系统代理。
@@ -309,7 +330,7 @@ def _fetch_kline_tencent(code: str, period: str) -> Optional[pd.DataFrame]:
                 'Close': float(bar[2]),   # 腾讯数组顺序：日期,开,收,高,低,量
                 'High': float(bar[3]),
                 'Low': float(bar[4]),
-                'Volume': int(float(bar[5]))
+                'Volume': int(bar[5])
             })
 
         df = pd.DataFrame(rows)

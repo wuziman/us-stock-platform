@@ -2,12 +2,13 @@
 价格监控服务：止损/止盈微信告警 + 组合净值快照 + 回撤破线告警
 
 由 scheduler_service 每10分钟触发 run_price_monitor()：
-- 仅在各持仓所属市场的交易时段内工作（美股9:30-16:00 ET / A股9:30-11:30,13:00-15:00）
+- 仅在各持仓所属市场的交易时段内工作（美股9:30-16:00 ET / A股9:30-11:30,13:00-15:00，自动跳过美股/A股法定节假日）
 - 止损/止盈穿越 → 企业微信推送（同天同仓同类型只推一次，PriceAlertLog去重；推送失败次日重试）
 - 每轮顺带把组合总市值 upsert 进 PortfolioSnapshot（净值曲线数据源）
 - 当前回撤 >= 20%（CLAUDE.md风控规则）→ 微信告警，每天最多一次
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional, Tuple
@@ -25,13 +26,66 @@ logger = logging.getLogger(__name__)
 
 KEY_ALERT_ENABLED = 'price_alert_enabled'   # Setting键：'true'(默认)/'false'
 MAX_DRAWDOWN_PCT = 20.0                     # CLAUDE.md：组合最大回撤20%
+DEFAULT_USD_CNY_RATE = 7.2                  # 美股+A股跨市场混合持仓默认折算汇率
+
+
+# ============================================
+# 法定休市节假日判断（纯函数，便于单测）
+# ============================================
+def _is_us_fixed_or_observed(d: date, month: int, day: int) -> bool:
+    """检查美股固定日期节假日及其周末顺延补休规则（周六落休周五，周日落休周一）"""
+    try:
+        actual = date(d.year, month, day)
+    except ValueError:
+        return False
+    if d == actual:
+        return True
+    if actual.weekday() == 5 and d == date(d.year, month, day - 1):
+        return True
+    if actual.weekday() == 6 and d == date(d.year, month, day + 1):
+        return True
+    return False
+
+
+def is_trading_holiday(market: str, d: date) -> bool:
+    """判定指定日期是否为美股(US)或A股(A)主要法定休市日"""
+    if market == 'US':
+        # 1. 固定节假日及顺延：元旦(1/1)、六月节(6/19)、独立日(7/4)、圣诞节(12/25)
+        for m, day_num in ((1, 1), (6, 19), (7, 4), (12, 25)):
+            if _is_us_fixed_or_observed(d, m, day_num):
+                return True
+        # 2. 马丁路德金日：1月第3个周一
+        if d.month == 1 and d.weekday() == 0 and 15 <= d.day <= 21:
+            return True
+        # 3. 总统日：2月第3个周一
+        if d.month == 2 and d.weekday() == 0 and 15 <= d.day <= 21:
+            return True
+        # 4. 阵亡将士纪念日：5月最后一个周一
+        if d.month == 5 and d.weekday() == 0 and d.day >= 25:
+            return True
+        # 5. 劳工节：9月第1个周一
+        if d.month == 9 and d.weekday() == 0 and d.day <= 7:
+            return True
+        # 6. 感恩节：11月第4个周四
+        if d.month == 11 and d.weekday() == 3 and 22 <= d.day <= 28:
+            return True
+        return False
+
+    # A股法定节假日：元旦(1/1)、五一劳动节(5/1-5/3)、十一国庆黄金周(10/1-10/7)
+    if d.month == 1 and d.day == 1:
+        return True
+    if d.month == 5 and 1 <= d.day <= 3:
+        return True
+    if d.month == 10 and 1 <= d.day <= 7:
+        return True
+    return False
 
 
 # ============================================
 # 纯函数（便于单测）
 # ============================================
 def is_market_open(market: str, now: Optional[datetime] = None) -> bool:
-    """判定指定市场当前是否处于交易时段（naive时间按北京时间理解；不含节假日休市）"""
+    """判定指定市场当前是否处于交易时段（naive时间按北京时间理解；自动过滤周末与主要法定节假日）"""
     now = now or datetime.now()
     sh_tz = pytz.timezone('Asia/Shanghai')
     if now.tzinfo is None:
@@ -39,14 +93,15 @@ def is_market_open(market: str, now: Optional[datetime] = None) -> bool:
 
     if market == 'US':
         local = now.astimezone(pytz.timezone('America/New_York'))
-        if local.weekday() > 4:
+        if local.weekday() > 4 or is_trading_holiday('US', local.date()):
             return False
         t = local.time()
         return dtime(9, 30) <= t <= dtime(16, 0)
     # A股（本机时区即北京时间）
-    if now.weekday() > 4:
+    local_cn = now.astimezone(sh_tz)
+    if local_cn.weekday() > 4 or is_trading_holiday('A', local_cn.date()):
         return False
-    t = now.time()
+    t = local_cn.time()
     return dtime(9, 30) <= t <= dtime(11, 30) or dtime(13, 0) <= t <= dtime(15, 0)
 
 
@@ -78,23 +133,28 @@ def compute_drawdown_stats(values: List[float]) -> Dict:
 # 数据访问与主流程
 # ============================================
 def _holding_quotes() -> List[Tuple[Position, float]]:
-    """全部持仓的现价（行情失败/停牌回退买入价），返回[(position, price)]"""
+    """全部持仓的现价（并行拉取，行情失败/停牌回退买入价），返回[(position, price)]"""
     svc = StockService()
-    out: List[Tuple[Position, float]] = []
     db = SessionLocal()
     try:
         positions = db.query(Position).filter(Position.status == "holding").all()
-        for pos in positions:
-            market = pos.market or detect_market(pos.stock_code)
-            try:
-                quote = svc.get_realtime_quote(pos.stock_code, market)
-            except Exception:
-                quote = None
-            price = quote['price'] if (quote and quote.get('price')) else pos.buy_price
-            out.append((pos, price))
     finally:
         db.close()
-    return out
+
+    if not positions:
+        return []
+
+    def _fetch_one(pos: Position) -> Tuple[Position, float]:
+        market = pos.market or detect_market(pos.stock_code)
+        try:
+            quote = svc.get_realtime_quote(pos.stock_code, market)
+        except Exception:
+            quote = None
+        price = quote['price'] if (quote and quote.get('price')) else pos.buy_price
+        return (pos, price)
+
+    with ThreadPoolExecutor(max_workers=min(8, len(positions))) as executor:
+        return list(executor.map(_fetch_one, positions))
 
 
 def _alert_already_sent(today: str, position_id: int, alert_type: str) -> bool:
@@ -134,6 +194,9 @@ def check_position_alerts(report_svc: ReportService, today: str) -> List[Dict]:
         if pos.take_profit and price >= pos.take_profit:
             checks.append(('take_profit', '🎯 止盈达标提醒', '≥', pos.take_profit))
 
+        mkt = pos.market or detect_market(pos.stock_code)
+        sym = '¥' if mkt == 'A' else '$'
+
         for alert_type, title, op, level_price in checks:
             if _alert_already_sent(today, pos.id, alert_type):
                 continue
@@ -141,8 +204,8 @@ def check_position_alerts(report_svc: ReportService, today: str) -> List[Dict]:
             content = (
                 f"### {title}\n"
                 f"> **{pos.stock_code} {pos.stock_name}**\n"
-                f"> 现价 **{price:.2f}** {op} 触发位 **{level_price:.2f}**\n"
-                f"> 距买入价({pos.buy_price:.2f})：{pnl_pct:+.1f}%\n"
+                f"> 现价 **{sym}{price:.2f}** {op} 触发位 **{sym}{level_price:.2f}**\n"
+                f"> 距买入价({sym}{pos.buy_price:.2f})：{pnl_pct:+.1f}%\n"
                 f"> 请检查仓位纪律 ⚠️"
             )
             result = report_svc.send_to_wechat(content)
@@ -155,9 +218,17 @@ def check_position_alerts(report_svc: ReportService, today: str) -> List[Dict]:
 
 
 def update_portfolio_snapshot() -> float:
-    """把组合总市值 upsert 到今天的快照（净值曲线数据源），返回总市值"""
+    """把组合总市值 upsert 到今天的快照（净值曲线数据源），返回总市值（跨币种混持自动折算）"""
     rows = _holding_quotes()
-    total = sum(float(pos.quantity or 0) * float(price or 0) for pos, price in rows)
+    markets = {pos.market or detect_market(pos.stock_code) for pos, _ in rows}
+    has_mixed = ('A' in markets and 'US' in markets)
+
+    total = 0.0
+    for pos, price in rows:
+        mkt = pos.market or detect_market(pos.stock_code)
+        scale = (1.0 / DEFAULT_USD_CNY_RATE) if (has_mixed and mkt == 'A') else 1.0
+        total += float(pos.quantity or 0) * float(price or 0) * scale
+
     today = date.today().isoformat()
     db = SessionLocal()
     try:

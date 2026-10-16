@@ -5,10 +5,11 @@ import {
 } from 'antd';
 import {
   FileTextOutlined, ReloadOutlined, SettingOutlined, ThunderboltOutlined,
-  RocketOutlined, StarOutlined
+  RocketOutlined, StarOutlined, LineChartOutlined, TrophyOutlined
 } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import { aiPickApi, stockApi, errDetail } from '../services/api';
-import type { PickRecord, StatusInfo, XhsSummaryRow, WeeklyAlphaResponse } from '../types/api';
+import type { PickRecord, StatusInfo, XhsSummaryRow, WeeklyAlphaResponse, WeeklyHistoryResponse } from '../types/api';
 import { colors } from '../theme/tokens';
 
 const { TextArea } = Input;
@@ -23,8 +24,10 @@ const TAG_TEXT_FIX = {
 } as const;
 
 const AIPick: React.FC = () => {
+  const navigate = useNavigate();
   // 周度美股硬科技选股 · Alpha TOP 5 猛禽池
   const [weeklyAlpha, setWeeklyAlpha] = useState<WeeklyAlphaResponse | null>(null);
+  const [weeklyHistory, setWeeklyHistory] = useState<WeeklyHistoryResponse | null>(null);
   const [loadingWeekly, setLoadingWeekly] = useState(true);
   const [scanningWeekly, setScanningWeekly] = useState(false);
 
@@ -48,8 +51,12 @@ const AIPick: React.FC = () => {
   const fetchWeeklyAlpha = async () => {
     setLoadingWeekly(true);
     try {
-      const res = await aiPickApi.getWeeklyAlphaTop5();
-      setWeeklyAlpha(res.data);
+      const [top5Res, histRes] = await Promise.allSettled([
+        aiPickApi.getWeeklyAlphaTop5(),
+        aiPickApi.getWeeklyAlphaHistory(),
+      ]);
+      if (top5Res.status === 'fulfilled') setWeeklyAlpha(top5Res.value.data);
+      if (histRes.status === 'fulfilled') setWeeklyHistory(histRes.value.data);
     } catch {
       // 容错静默
     } finally {
@@ -64,6 +71,7 @@ const AIPick: React.FC = () => {
       const res = await aiPickApi.triggerWeeklyAlphaScan();
       setWeeklyAlpha(res.data);
       message.success({ content: '周度 Alpha TOP 5 猛禽池选股已完成！', key: 'weekly-scan' });
+      aiPickApi.getWeeklyAlphaHistory().then((r) => setWeeklyHistory(r.data)).catch(() => {});
     } catch (err) {
       message.error({ content: errDetail(err, '选股扫描失败'), key: 'weekly-scan' });
     } finally {
@@ -224,7 +232,7 @@ const AIPick: React.FC = () => {
   };
 
   const grouped = history.reduce<Record<string, PickRecord[]>>((acc, r) => {
-        (acc[r.run_date] = acc[r.run_date] || []).push(r);
+    (acc[r.run_date] = acc[r.run_date] || []).push(r);
     return acc;
   }, {});
 
@@ -255,6 +263,25 @@ const AIPick: React.FC = () => {
         }
         style={{ marginBottom: 20, borderColor: colors.primary, borderRadius: 8 }}
       >
+        {weeklyHistory?.cumulative && weeklyHistory.cumulative.total_weeks > 0 && (
+          <Alert
+            type="success"
+            icon={<TrophyOutlined />}
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={
+              <Space wrap>
+                <b>🏆 猛禽池跨周累积实盘战绩：</b>
+                <Tag color="blue">累计复盘 {weeklyHistory.cumulative.total_weeks} 期 ({weeklyHistory.cumulative.total_picks} 支次)</Tag>
+                <Tag color="green">总胜率 {weeklyHistory.cumulative.overall_win_rate}% ({weeklyHistory.cumulative.total_winners}胜)</Tag>
+                <Tag color={weeklyHistory.cumulative.avg_return_pct >= 0 ? 'gold' : 'red'}>
+                  单周平均收益 {weeklyHistory.cumulative.avg_return_pct >= 0 ? '+' : ''}{weeklyHistory.cumulative.avg_return_pct}%
+                </Tag>
+              </Space>
+            }
+          />
+        )}
+
         {weeklyAlpha?.ai_thesis && (
           <Alert
             type="info"
@@ -282,14 +309,24 @@ const AIPick: React.FC = () => {
                       </Space>
                     }
                     extra={
-                      <Tooltip title="加入自选股">
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<StarOutlined />}
-                          onClick={() => handleAddWatch(item.code, item.name)}
-                        />
-                      </Tooltip>
+                      <Space size={2}>
+                        <Tooltip title="跳转个股深度分析">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<LineChartOutlined />}
+                            onClick={() => navigate(`/analysis?code=${item.code}&name=${encodeURIComponent(item.name)}&market=US`)}
+                          />
+                        </Tooltip>
+                        <Tooltip title="加入自选股">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<StarOutlined />}
+                            onClick={() => handleAddWatch(item.code, item.name)}
+                          />
+                        </Tooltip>
+                      </Space>
                     }
                     style={{ height: '100%', borderRadius: 8, boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}
                   >
@@ -312,6 +349,14 @@ const AIPick: React.FC = () => {
                     <div style={{ fontSize: 11, color: colors.textSecondary, marginBottom: 8, lineHeight: 1.6 }}>
                       <div>动量: <b>{item.momentum_score}</b> | 超跌: <b>{item.sweetspot_score}</b></div>
                       <div>RSI: <b>{item.rsi}</b> | 模拟胜率: <b style={{ color: item.win_rate >= 60 ? colors.profit : undefined }}>{item.win_rate}%</b></div>
+                      {(item.forward_pe != null || item.upside_pct != null) && (
+                        <div>
+                          {item.forward_pe != null && <span>远期PE: <b>{item.forward_pe}</b> </span>}
+                          {item.upside_pct != null && (
+                            <span>| 目标价空间: <b style={{ color: item.upside_pct >= 0 ? colors.profit : colors.loss }}>{item.upside_pct >= 0 ? '+' : ''}{item.upside_pct}%</b></span>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     <div style={{ background: colors.bgLight, padding: '6px 8px', borderRadius: 6, fontSize: 11 }}>
@@ -393,7 +438,7 @@ const AIPick: React.FC = () => {
           message="AI供应商未配置"
           description={
             <div style={{ fontSize: 13 }}>
-              请编辑 <b>股票投资/config/config.json</b>，添加 ai_provider 字段（该文件不会提交到git）：
+              请编辑 <b>config/config.json</b>，添加 ai_provider 字段（该文件不会提交到git）：
               <Paragraph copyable style={{ margin: '8px 0 0', fontSize: 12, background: colors.bgLight, padding: 8 }}>
                 {`"ai_provider": {"base_url": "https://openrouter.ai/api/v1", "api_key": "你的key", "model": "厂商/模型ID"}`}
               </Paragraph>
@@ -509,10 +554,24 @@ const AIPick: React.FC = () => {
       ) : (
         Object.entries(grouped).map(([runDate, picks]) => {
           const commentary = picks.find((p) => p.market_commentary)?.market_commentary;
+          const tracked = picks.filter((p) => p.return_pct != null);
+          const winCount = tracked.filter((p) => (p.return_pct ?? 0) > 0).length;
+          const avgRet = tracked.length > 0
+            ? Number((tracked.reduce((s, p) => s + (p.return_pct ?? 0), 0) / tracked.length).toFixed(2))
+            : null;
           return (
             <Card
               key={runDate}
-              title={`📋 ${runDate} 选股结果`}
+              title={
+                <Space wrap>
+                  <span>📋 {runDate} 选股结果</span>
+                  {avgRet !== null && (
+                    <Tag color={avgRet >= 0 ? 'green' : 'red'}>
+                      至今等权 {avgRet >= 0 ? '+' : ''}{avgRet}% (胜率 {winCount}/{tracked.length})
+                    </Tag>
+                  )}
+                </Space>
+              }
               style={{ marginBottom: 16 }}
               extra={<Tooltip title="按rank排序"><Tag>{picks.length}只</Tag></Tooltip>}
             >
@@ -529,7 +588,7 @@ const AIPick: React.FC = () => {
                   key={p.id}
                   type="inner"
                   title={
-                    <Space>
+                    <Space wrap>
                       <b>#{p.rank} {p.stock_code}</b>
                       <span>{p.stock_name}</span>
                       <Tag
@@ -538,7 +597,33 @@ const AIPick: React.FC = () => {
                       >
                         {CONF_LABEL[p.confidence]}
                       </Tag>
-                      {p.price_at_pick != null && <span style={{ color: colors.textSecondary }}>@${p.price_at_pick}</span>}
+                      {p.price_at_pick != null && <span style={{ color: colors.textSecondary }}>入选@${p.price_at_pick}</span>}
+                      {p.current_price != null && <span style={{ color: colors.textSecondary }}>→ 现价${p.current_price}</span>}
+                      {p.return_pct != null && (
+                        <Tag color={p.return_pct >= 0 ? 'green' : 'red'} style={{ fontWeight: 'bold' }}>
+                          至今 {p.return_pct >= 0 ? '+' : ''}{p.return_pct}%
+                        </Tag>
+                      )}
+                    </Space>
+                  }
+                  extra={
+                    <Space size={4}>
+                      <Button
+                        size="small"
+                        type="link"
+                        icon={<LineChartOutlined />}
+                        onClick={() => navigate(`/analysis?code=${p.stock_code}&name=${encodeURIComponent(p.stock_name)}&market=US`)}
+                      >
+                        深度分析
+                      </Button>
+                      <Button
+                        size="small"
+                        type="link"
+                        icon={<StarOutlined />}
+                        onClick={() => handleAddWatch(p.stock_code, p.stock_name)}
+                      >
+                        加自选
+                      </Button>
                     </Space>
                   }
                   style={{ marginBottom: 12 }}

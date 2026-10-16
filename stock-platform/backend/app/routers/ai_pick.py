@@ -2,13 +2,17 @@
 AI选股相关API
 - GET  /api/ai-pick/status       配置状态（不回传key本身）
 - POST /api/ai-pick/run          运行一次AI选股（耗时约1-3分钟）
-- GET  /api/ai-pick/history      历史选股结果
+- GET  /api/ai-pick/history      历史选股结果（含并行实时现价与入选至今涨跌幅复盘）
 - GET  /api/ai-pick/xhs-config   小红书配置读取
 - PUT  /api/ai-pick/xhs-config   小红书配置保存（Cookie/博主列表）
 - POST /api/ai-pick/xhs-refresh  手动抓取博主最新帖子
 - GET  /api/ai-pick/xhs-summaries 已存博主总结
 - POST /api/ai-pick/xhs-summaries 生成各博主近期帖子AI总结
 """
+
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Dict, List
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -19,8 +23,52 @@ from ..models_platform import AIPick, XhsPost
 from ..services import xhs_service
 from ..services.ai_pick_service import generate_xhs_summaries, get_xhs_summaries, run_ai_pick
 from ..services.llm_client import is_ai_configured, load_ai_provider_config
+from ..services.stock_service import StockService
+from ..utils.market import detect_market
 
 router = APIRouter(prefix="/api/ai-pick", tags=["ai-pick"])
+stock_service = StockService()
+
+
+def _repo_root() -> Path:
+    """定位仓库根目录（<repo>/stock-platform/backend/app/routers/ai_pick.py 向上5层为 <repo>）"""
+    p4 = Path(__file__).resolve().parents[4]
+    p3 = Path(__file__).resolve().parents[3]
+    if (p4 / "tech_stock_screener.py").exists() or (p4 / "data").exists():
+        return p4
+    return p3
+
+
+def _resolve_data_file(filename: str) -> Path:
+    """优先定位仓库根 data/<filename>，兼容 stock-platform/data/<filename>"""
+    p4_file = Path(__file__).resolve().parents[4] / "data" / filename
+    if p4_file.exists():
+        return p4_file
+    p3_file = Path(__file__).resolve().parents[3] / "data" / filename
+    if p3_file.exists():
+        return p3_file
+    return p4_file
+
+
+def enrich_picks_with_returns(picks: List[Dict], quote_map: Dict[str, float]) -> List[Dict]:
+    """为历史AI选股记录注入最新现价与入选至今收益率（纯函数，便于单测）"""
+    enriched = []
+    for p in picks:
+        item = dict(p)
+        code = item.get('stock_code', '')
+        entry_px = item.get('price_at_pick')
+        curr_px = quote_map.get(code)
+        if curr_px is not None and curr_px > 0:
+            item['current_price'] = round(float(curr_px), 2)
+            if entry_px and entry_px > 0:
+                item['return_pct'] = round((float(curr_px) - float(entry_px)) / float(entry_px) * 100, 2)
+            else:
+                item['return_pct'] = None
+        else:
+            item['current_price'] = None
+            item['return_pct'] = None
+        enriched.append(item)
+    return enriched
 
 
 @router.get("/status")
@@ -52,12 +100,12 @@ def run_selection():
 
 
 @router.get("/history")
-def get_history(limit: int = 30, db: Session = Depends(get_db)):
-    """历史选股记录（新→旧）"""
+def get_history(limit: int = 30, include_quotes: bool = True, db: Session = Depends(get_db)):
+    """历史选股记录（新→旧，默认并行拉取最新价计算入选至今涨跌幅）"""
     rows = (db.query(AIPick)
             .order_by(AIPick.created_at.desc(), AIPick.rank.asc())
             .limit(limit).all())
-    return [{
+    base_list = [{
         'id': r.id,
         'run_date': r.run_date,
         'created_at': r.created_at.isoformat() if r.created_at else None,
@@ -72,6 +120,27 @@ def get_history(limit: int = 30, db: Session = Depends(get_db)):
         'market_commentary': r.market_commentary,
         'price_at_pick': r.price_at_pick,
     } for r in rows]
+
+    if not include_quotes or not base_list:
+        return enrich_picks_with_returns(base_list, {})
+
+    unique_codes = sorted({r['stock_code'] for r in base_list if r.get('stock_code')})
+    quote_map: Dict[str, float] = {}
+
+    def _fetch_px(code: str):
+        try:
+            q = stock_service.get_realtime_quote(code, detect_market(code))
+            return (code, q.get('price') if q else None)
+        except Exception:
+            return (code, None)
+
+    if unique_codes:
+        with ThreadPoolExecutor(max_workers=min(8, len(unique_codes))) as executor:
+            for code, px in executor.map(_fetch_px, unique_codes):
+                if px is not None and px > 0:
+                    quote_map[code] = float(px)
+
+    return enrich_picks_with_returns(base_list, quote_map)
 
 
 class XhsConfigRequest(BaseModel):
@@ -143,8 +212,7 @@ def refresh_xhs_summaries():
 def get_weekly_top5():
     """获取最新周度 Alpha TOP 5 猛禽池数据"""
     import json
-    from pathlib import Path
-    data_file = Path(__file__).resolve().parent.parent.parent.parent / "data" / "weekly_alpha_top5.json"
+    data_file = _resolve_data_file("weekly_alpha_top5.json")
     if data_file.exists():
         try:
             with open(data_file, 'r', encoding='utf-8') as f:
@@ -163,8 +231,7 @@ def get_weekly_top5():
 def trigger_weekly_scan():
     """手动触发一次硬科技全池选股扫描"""
     import sys
-    from pathlib import Path
-    root_dir = Path(__file__).resolve().parent.parent.parent.parent
+    root_dir = _repo_root()
     if str(root_dir) not in sys.path:
         sys.path.insert(0, str(root_dir))
     try:
@@ -178,8 +245,7 @@ def trigger_weekly_scan():
 def get_weekly_history():
     """获取猛禽池累积历史战报"""
     import json
-    from pathlib import Path
-    history_file = Path(__file__).resolve().parent.parent.parent.parent / "data" / "weekly_alpha_history.json"
+    history_file = _resolve_data_file("weekly_alpha_history.json")
     if history_file.exists():
         try:
             with open(history_file, 'r', encoding='utf-8') as f:

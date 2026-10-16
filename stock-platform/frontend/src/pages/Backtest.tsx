@@ -1,11 +1,12 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Card, Input, Select, Button, Row, Col, Form, InputNumber, DatePicker, Table, Tag, Statistic, Space, message, Descriptions, Divider } from 'antd';
-import { SearchOutlined, ExperimentOutlined } from '@ant-design/icons';
+import { Card, Input, Select, Button, Row, Col, Form, InputNumber, DatePicker, Table, Tag, Statistic, Space, message, Descriptions, Divider, Checkbox } from 'antd';
+import { SearchOutlined, ExperimentOutlined, DownloadOutlined } from '@ant-design/icons';
 import { ComparePanel, OptimizePanel, WalkForwardPanel } from '../components/BacktestPanels';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
 import { stockApi, backtestApi } from '../services/api';
 import { colors } from '../theme/tokens';
+import { downloadCsv } from '../utils/format';
 import type { BacktestResult, CompareResult, SearchResult, Strategy } from '../types/api';
 
 const { Search } = Input;
@@ -59,7 +60,7 @@ const Backtest: React.FC = () => {
     }
   };
 
-  const handleRunBacktest = async () => {
+  const handleRunBacktest = async (overrideStrategy?: string, customParams?: Record<string, number>) => {
     try {
       const values = await form.validateFields();
 
@@ -71,18 +72,26 @@ const Backtest: React.FC = () => {
       setLoading(true);
       const seq = selectSeqRef.current;
 
+      const targetStrategy = overrideStrategy || values.strategy;
+      if (overrideStrategy) {
+        form.setFieldValue('strategy', overrideStrategy);
+      }
+
       const response = await backtestApi.runBacktest({
         stock_code: selectedStock.code,
-        strategy: values.strategy,
+        strategy: targetStrategy,
         period: values.period,
         start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
-        initial_capital: values.initial_capital
+        initial_capital: values.initial_capital,
+        trailing_stop: !!values.trailing_stop,
+        staged_entry: !!values.staged_entry,
+        params: customParams,
       });
 
       if (seq !== selectSeqRef.current) return; // 等待期间已切股，丢弃过期结果
       setBacktestResult(response.data);
-      message.success('回测完成');
+      message.success(customParams ? '已按寻优最优参数完成回测' : '回测完成');
     } catch (error) {
       if ((error as { errorFields?: unknown }).errorFields) {
         return;
@@ -107,7 +116,9 @@ const Backtest: React.FC = () => {
       const response = await backtestApi.compare({
         stock_code: selectedStock.code,
         period: values.period || '1y',
-        initial_capital: values.initial_capital || 100000
+        initial_capital: values.initial_capital || 100000,
+        trailing_stop: !!values.trailing_stop,
+        staged_entry: !!values.staged_entry,
       });
       if (seq !== selectSeqRef.current) return; // 等待期间已切股，丢弃过期结果
       setCompareResult(response.data);
@@ -125,18 +136,47 @@ const Backtest: React.FC = () => {
     const curve = backtestResult.equity_curve;
     if (!curve || curve.length === 0) return {};
 
-    const series: any[] = [{
-      name: '总资产',
-      type: 'line',
-      data: curve.map(d => d.value),
-      smooth: true,
-      showSymbol: false,
-      lineStyle: { width: 2, color: colors.primary },
-      areaStyle: {
-        opacity: 0.15,
-        color: colors.primary
-      }
-    }];
+    const dateToEquity = new Map(curve.map(d => [d.date, d.value]));
+    const buyMarkers = (backtestResult.trades || [])
+      .filter(t => t.action === 'buy' && dateToEquity.has(t.date))
+      .map(t => ({ value: [t.date, dateToEquity.get(t.date)], price: t.price, shares: t.shares }));
+    const sellMarkers = (backtestResult.trades || [])
+      .filter(t => t.action === 'sell' && dateToEquity.has(t.date))
+      .map(t => ({ value: [t.date, dateToEquity.get(t.date)], price: t.price, profit_pct: t.profit_pct }));
+
+    const series: any[] = [
+      {
+        name: '总资产',
+        type: 'line',
+        data: curve.map(d => d.value),
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { width: 2, color: colors.primary },
+        areaStyle: {
+          opacity: 0.15,
+          color: colors.primary
+        }
+      },
+      ...(buyMarkers.length > 0 ? [{
+        name: '买入点 (B)',
+        type: 'scatter',
+        data: buyMarkers,
+        symbol: 'triangle',
+        symbolSize: 12,
+        itemStyle: { color: colors.profit },
+        z: 10
+      }] : []),
+      ...(sellMarkers.length > 0 ? [{
+        name: '卖出点 (S)',
+        type: 'scatter',
+        data: sellMarkers,
+        symbol: 'triangle',
+        symbolRotate: 180,
+        symbolSize: 12,
+        itemStyle: { color: colors.loss },
+        z: 10
+      }] : [])
+    ];
 
     // 叠加买入持有基准（灰色虚线）
     if (backtestResult.buy_hold_curve && backtestResult.buy_hold_curve.length > 0) {
@@ -321,12 +361,25 @@ const Backtest: React.FC = () => {
                 </Col>
               </Row>
 
+              <Row gutter={16} style={{ marginBottom: 8 }}>
+                <Col xs={24} md={12}>
+                  <Form.Item name="trailing_stop" valuePropName="checked" style={{ marginBottom: 4 }}>
+                    <Checkbox>🛡️ 启用移动止盈保本（浮盈+10%自动上移止损至成本+1%，并按最高点-8%追踪止盈）</Checkbox>
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={12}>
+                  <Form.Item name="staged_entry" valuePropName="checked" style={{ marginBottom: 4 }}>
+                    <Checkbox>📐 启用分批金字塔建仓（首仓50%资金，回撤5%补仓剩余50%摊低成本）</Checkbox>
+                  </Form.Item>
+                </Col>
+              </Row>
+
               <Form.Item>
                 <Space size="middle">
                   <Button
                     type="primary"
                     icon={<ExperimentOutlined />}
-                    onClick={handleRunBacktest}
+                    onClick={() => handleRunBacktest()}
                     loading={loading}
                     size="large"
                   >
@@ -361,6 +414,7 @@ const Backtest: React.FC = () => {
               const v = form.getFieldsValue();
               return { period: v.period || '1y', initial_capital: v.initial_capital || 100000 };
             }}
+            onApplyBestParams={(strat, bestParams) => handleRunBacktest(strat, bestParams)}
           />
 
           <WalkForwardPanel
@@ -481,7 +535,32 @@ const Backtest: React.FC = () => {
                 </Descriptions>
               </Card>
 
-              <Card title="📝 交易记录">
+              <Card
+                title="📝 交易记录"
+                extra={
+                  backtestResult.trades && backtestResult.trades.length > 0 ? (
+                    <Button
+                      size="small"
+                      icon={<DownloadOutlined />}
+                      onClick={() => {
+                        downloadCsv(
+                          `backtest_${backtestResult.stock_code}_${backtestResult.strategy}.csv`,
+                          ['日期', '操作', '价格', '数量', '收益率(%)'],
+                          backtestResult.trades.map((t) => [
+                            t.date,
+                            t.action === 'buy' ? '买入' : '卖出',
+                            t.price,
+                            t.shares,
+                            t.profit_pct !== undefined ? (t.profit_pct * 100).toFixed(2) : '',
+                          ])
+                        );
+                      }}
+                    >
+                      导出CSV
+                    </Button>
+                  ) : null
+                }
+              >
                 <Table
                   style={{ whiteSpace: 'nowrap' }}
                   columns={tradeColumns}

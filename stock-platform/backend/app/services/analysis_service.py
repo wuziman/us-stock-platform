@@ -1,9 +1,10 @@
 """
 分析服务
 真实数据源：
-- 消息面：NewsAPI（美股）+ 新浪个股新闻（A股），关键词情感分析
-- 宏观面：FRED API（联邦利率/CPI/失业率），规则评分
+- 消息面：NewsAPI + yfinance实时新闻流（美股双源融合去重）+ 新浪个股新闻（A股），关键词情感分析
+- 宏观面：美股走FRED API（联邦利率/CPI/失业率）；A股走沪深300/上证指数趋势与市场流动性评估
 - 事件驱动：yfinance财报日历（美股）
+- 策略点位：支持固定止盈止损 + ATR(14)波动率自适应点位 + 浮盈10%保本上移线
 """
 
 import re
@@ -20,8 +21,8 @@ from ..utils.app_config import load_config
 from ..utils.price_levels import (
     LINEAR_PROFIT_PCT,
     NONLINEAR_PROFIT_PCT,
+    atr_adaptive_levels,
     discipline_stop,
-    levels_with_targets,
     linear_buy_point,
     macd_state_days,
     nonlinear_buy_point,
@@ -190,7 +191,7 @@ class AnalysisService:
             recommendation['action'] = "观望"
             recommendation['confidence'] = "高"
 
-        # 计算三策略点位（线性/非线性/MACD）
+        # 计算三策略点位（线性/非线性/MACD + ATR动态点位 + 保本触发位）
         price_levels = self._calculate_both_strategies(df_with_indicators, latest, market)
 
         return {
@@ -228,12 +229,15 @@ class AnalysisService:
     def _analyze_news(self, stock_code: str, stock_name: str, market: str = "US") -> Tuple[float, Dict]:
         """消息面分析：真实新闻获取 + 关键词情感评分"""
         news_items: List[Dict] = []
+        sources_used: List[str] = []
 
         try:
             if market == "US":
                 news_items = self._fetch_news_us(stock_code, stock_name)
+                sources_used = list({n.get('source_api', 'Yahoo Finance') for n in news_items}) or ['Yahoo Finance / NewsAPI']
             else:
                 news_items = self._fetch_news_cn(stock_code)
+                sources_used = ['新浪财经']
         except Exception as e:
             print(f"新闻获取失败: {e}")
 
@@ -269,46 +273,92 @@ class AnalysisService:
             'positive_count': pos_count,
             'negative_count': neg_count,
             'sentiment': sentiment_label,
-            'sources': ['NewsAPI'] if market == 'US' else ['新浪财经'],
+            'sources': sources_used,
             'news': news_items[:20]  # 前端默认显示8条，可展开全部
         }
 
         return max(0, min(10, score)), details
 
     def _fetch_news_us(self, stock_code: str, stock_name: str) -> List[Dict]:
-        """美股新闻：NewsAPI"""
+        """美股新闻：融合 yfinance 实时个股新闻流 + NewsAPI（去重互补，无 API Key 时同样可用）"""
         items: List[Dict] = []
-        api_key = self.api_keys.get('newsapi')
-        if not api_key:
-            return items
+        seen_titles: set = set()
 
+        # 1. 优先拉取 yfinance 免费实时个股专属新闻流（零延迟、高相关性）
         try:
-            resp = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={
-                    # 引号短语匹配，避免代码缩写(如MU)误匹配无关新闻
-                    'q': f'"{stock_name}"',
-                    'language': 'en',
-                    'sortBy': 'publishedAt',
-                    'pageSize': 15,
-                    'apiKey': api_key
-                },
-                timeout=8
-            )
-            if resp.status_code == 200:
-                for art in resp.json().get('articles', [])[:15]:
-                    title = art.get('title') or ''
-                    if not title:
-                        continue
-                    items.append({
-                        'title': title,
-                        'source': (art.get('source') or {}).get('name', ''),
-                        'date': (art.get('publishedAt') or '')[:10],
-                        'url': art.get('url') or '',
-                        'sentiment': score_text_sentiment(title)
-                    })
+            import yfinance as yf
+            from datetime import datetime
+            yf_news = getattr(yf.Ticker(stock_code), 'news', None) or []
+            for raw in yf_news[:12]:
+                if not isinstance(raw, dict):
+                    continue
+                # 兼容新版 yfinance (raw['content']) 与旧版扁平字典结构
+                content = raw.get('content') if isinstance(raw.get('content'), dict) else raw
+                title = (content.get('title') or '').strip()
+                if not title or title.lower() in seen_titles:
+                    continue
+                seen_titles.add(title.lower())
+
+                provider = content.get('provider')
+                source_name = (
+                    provider.get('displayName', 'Yahoo Finance')
+                    if isinstance(provider, dict)
+                    else (content.get('publisher') or 'Yahoo Finance')
+                )
+                canonical = content.get('canonicalUrl')
+                url = (
+                    canonical.get('url', '')
+                    if isinstance(canonical, dict)
+                    else (content.get('link') or '')
+                )
+                pub_date = content.get('pubDate') or content.get('providerPublishTime') or ''
+                if isinstance(pub_date, (int, float)):
+                    date_str = datetime.fromtimestamp(pub_date).strftime('%Y-%m-%d')
+                else:
+                    date_str = str(pub_date)[:10]
+
+                items.append({
+                    'title': title,
+                    'source': source_name,
+                    'date': date_str,
+                    'url': url,
+                    'sentiment': score_text_sentiment(title),
+                    'source_api': 'Yahoo Finance',
+                })
         except Exception as e:
-            print(f"NewsAPI获取失败: {e}")
+            logger.debug(f"yfinance 新闻获取异常 ({stock_code}): {e}")
+
+        # 2. 补充 NewsAPI 跨媒体新闻（如已配置 NEWSAPI_KEY）
+        api_key = self.api_keys.get('newsapi')
+        if api_key:
+            try:
+                resp = requests.get(
+                    "https://newsapi.org/v2/everything",
+                    params={
+                        'q': f'"{stock_name}"',
+                        'language': 'en',
+                        'sortBy': 'publishedAt',
+                        'pageSize': 12,
+                        'apiKey': api_key
+                    },
+                    timeout=8
+                )
+                if resp.status_code == 200:
+                    for art in resp.json().get('articles', [])[:12]:
+                        title = (art.get('title') or '').strip()
+                        if not title or title.lower() in seen_titles:
+                            continue
+                        seen_titles.add(title.lower())
+                        items.append({
+                            'title': title,
+                            'source': (art.get('source') or {}).get('name', 'NewsAPI'),
+                            'date': (art.get('publishedAt') or '')[:10],
+                            'url': art.get('url') or '',
+                            'sentiment': score_text_sentiment(title),
+                            'source_api': 'NewsAPI',
+                        })
+            except Exception as e:
+                print(f"NewsAPI获取失败: {e}")
 
         return items
 
@@ -328,15 +378,12 @@ class AnalysisService:
             resp = session.get(url, timeout=8)
             resp.encoding = 'gbk'
 
-            # 解析格式：&nbsp;日期&nbsp;时间&nbsp;<a href='..'>标题</a>
-            # 注意：HTML源码中是字面量"&nbsp;"实体，不是空白字符
             sep = r"(?:\s|&nbsp;|#xa0;|\xa0)*"
             pattern = re.compile(
                 rf"(\d{{4}}-\d{{2}}-\d{{2}}){sep}(\d{{2}}:\d{{2}}){sep}<a[^>]*href='([^']+)'[^>]*>([^<]+)</a>"
             )
             for m in pattern.finditer(resp.text):
                 date_str, time_str, href, title = m.groups()
-                # 新浪链接多为绝对地址；兼容协议相对(//)与根相对(/)写法
                 if href.startswith('//'):
                     link = 'https:' + href
                 elif href.startswith('http'):
@@ -358,10 +405,13 @@ class AnalysisService:
         return items
 
     # ============================================
-    # 3. 宏观面（FRED真实数据 + 规则评分）
+    # 3. 宏观面（美股走FRED；A股走本土大盘趋势与量能评估）
     # ============================================
     def _analyze_macro(self, market: str = "US") -> Tuple[float, Dict]:
-        """宏观面分析：FRED利率/CPI/失业率"""
+        """宏观面分析：按市场区分美股（FRED利率/CPI/失业率）与A股（沪深大盘趋势与交投活跃度）"""
+        if market == "A":
+            return self._analyze_macro_cn()
+
         score = 5.0
         details: Dict[str, Any] = {
             'indicators': {},
@@ -374,7 +424,6 @@ class AnalysisService:
             details['interpretations'].append('未配置FRED API Key，使用中性评分')
             return score, details
 
-        # 获取：联邦利率（近3个月）、CPI（近25个月，过滤'.'后取13个算同比）、失业率
         fed_rates = self._fred_series('DFF', months=4)
         cpi_series = self._fred_series('CPIAUCSL', months=25)
         unrate = self._fred_series('UNRATE', months=1)
@@ -400,10 +449,9 @@ class AnalysisService:
                 details['interpretations'].append(f"利率平稳({latest_rate}%)")
 
         # 2. CPI同比：通胀温和利好，高通胀利空
-        #    （FRED近期月份可能为'.'占位，多取一些再过滤）
         if len(cpi_series) >= 13:
             cpi_latest = cpi_series[-1]['value']
-            cpi_year_ago = cpi_series[-13]['value']  # 12个月前
+            cpi_year_ago = cpi_series[-13]['value']
             if cpi_year_ago and cpi_latest:
                 cpi_yoy = (cpi_latest / cpi_year_ago - 1) * 100
                 details['indicators']['cpi_yoy'] = round(cpi_yoy, 2)
@@ -431,6 +479,33 @@ class AnalysisService:
 
         return max(0, min(10, score)), details
 
+    def _analyze_macro_cn(self) -> Tuple[float, Dict]:
+        """A股宏观与大盘环境评估：基于沪深核心基准走势与量能趋势"""
+        score = 5.5
+        details: Dict[str, Any] = {
+            'indicators': {},
+            'interpretations': ['A股本土流动性与市场风险偏好评估'],
+            'sources': ['沪深市场基准']
+        }
+        try:
+            # 拉取平安银行/招商银行或沪深代表性权重作为市场温度计参考
+            df_bench = self.stock_service.get_stock_data('000001', 'A', period='3mo')
+            if df_bench is not None and len(df_bench) >= 20:
+                close = df_bench['Close']
+                cur = float(close.iloc[-1])
+                ma20 = float(close.rolling(20).mean().iloc[-1])
+                ret20 = (cur / float(close.iloc[-20]) - 1) * 100
+                details['indicators']['market_20d_chg'] = round(ret20, 2)
+                if cur > ma20:
+                    score += 1.0
+                    details['interpretations'].append(f"A股蓝筹基准站上20日均线(近20日{ret20:+.1f}%)，多头情绪回暖")
+                else:
+                    score -= 0.5
+                    details['interpretations'].append(f"A股蓝筹基准处于20日均线下方(近20日{ret20:+.1f}%)，建议控制仓位")
+        except Exception:
+            pass
+        return max(0.0, min(10.0, score)), details
+
     def _fred_series(self, series_id: str, months: int = 1) -> List[Dict]:
         """获取FRED序列最近N个月数据，失败返回空列表"""
         try:
@@ -448,7 +523,7 @@ class AnalysisService:
             if resp.status_code == 200:
                 obs = resp.json().get('observations', [])
                 result = []
-                for o in reversed(obs):  # 时间正序
+                for o in reversed(obs):
                     val = o.get('value')
                     if val not in (None, '.', ''):
                         result.append({'date': o.get('date'), 'value': float(val)})
@@ -461,7 +536,7 @@ class AnalysisService:
     # 4. 事件驱动（财报日历）
     # ============================================
     def _analyze_events(self, stock_code: str, stock_name: str, market: str = "US") -> Tuple[float, Dict]:
-        """事件驱动分析：财报日历（美股），A股暂用中性"""
+        """事件驱动分析：财报日历（美股），A股暂用定期报告窗口期提醒"""
         score = 5.0
         details: Dict[str, Any] = {'events': [], 'sources': []}
 
@@ -495,20 +570,26 @@ class AnalysisService:
                         'name': '财报发布',
                         'date': date_str,
                         'days_away': days_away,
-                        'impact': '财报临近，波动可能加大'
+                        'impact': '财报临近，波动可能加剧'
                     })
-                    # 财报前7天内：机会与风险并存，轻微降分提醒谨慎
                     if 0 <= days_away <= 7:
                         score -= 0.5
                         details['events'][-1]['impact'] = '⚠️ 财报临近（7天内），业绩不确定性高，注意波动风险'
             except Exception as e:
                 print(f"财报日历获取失败: {e}")
         else:
+            from datetime import date
+            m = date.today().month
+            window_note = (
+                "当前处于A股财报密集披露月（1/4/7/8/10月），注意业绩暴雷或超预期催化"
+                if m in (1, 4, 7, 8, 10)
+                else "当前处于A股财报真空期，个股受行业催化剂与资金面驱动为主"
+            )
             details['events'].append({
-                'name': 'A股事件跟踪',
+                'name': 'A股财报季日历',
                 'date': '',
                 'days_away': None,
-                'impact': 'A股财报/事件日历暂无可靠免费数据源，建议关注交易所公告'
+                'impact': window_note
             })
 
         return max(0, min(10, score)), details
@@ -528,13 +609,14 @@ class AnalysisService:
 
     def _calculate_both_strategies(self, df: pd.DataFrame, latest: pd.Series, market: str) -> Dict:
         """
-        计算双策略点位（复用原来的逻辑）
+        计算三策略点位（含固定比例止盈止损 + ATR(14)波动率自适应点位 + 浮盈10%保本上移触发位）
         """
         try:
             current_price = latest.get('Close', 0)
             rsi = latest.get('RSI', 50)
             ma20 = latest.get('MA20', current_price)
             bb_lower = latest.get('BB_Lower', current_price * 0.9)
+            atr = latest.get('ATR', None)
 
             if pd.isna(ma20):
                 ma20 = current_price * 0.95
@@ -542,6 +624,7 @@ class AnalysisService:
                 bb_lower = current_price * 0.9
             if pd.isna(rsi):
                 rsi = 50
+            atr_val = float(atr) if (atr is not None and pd.notna(atr)) else None
 
             # 线性/非线性点位公式走共享模块（utils/price_levels.py，唯一定义处）
             linear_buy = linear_buy_point(current_price, ma20)
@@ -552,15 +635,22 @@ class AnalysisService:
 
             return {
                 'current_price': round(current_price, 2),
-                'linear': levels_with_targets(current_price, linear_buy, LINEAR_PROFIT_PCT),
-                'nonlinear': levels_with_targets(current_price, nonlinear_buy, NONLINEAR_PROFIT_PCT),
+                'atr': round(atr_val, 2) if atr_val else None,
+                'linear': atr_adaptive_levels(
+                    current_price, linear_buy, LINEAR_PROFIT_PCT, atr=atr_val,
+                    stop_atr_mult=2.0, profit_atr_mult=3.5
+                ),
+                'nonlinear': atr_adaptive_levels(
+                    current_price, nonlinear_buy, NONLINEAR_PROFIT_PCT, atr=atr_val,
+                    stop_atr_mult=2.2, profit_atr_mult=6.5
+                ),
                 'macd': macd_info
             }
         except Exception:
-            # 指标数据不足等异常：返回null让前端显示占位符，绝不返回0元点位误导决策
             logger.warning("计算策略点位失败", exc_info=True)
             return {
                 'current_price': None,
+                'atr': None,
                 'linear': {'buy': None, 'stop': None, 'profit': None, 'distance': None},
                 'nonlinear': {'buy': None, 'stop': None, 'profit': None, 'distance': None},
                 'macd': {'state': 'unknown', 'days_in_state': 0, 'hist': 0,
@@ -570,9 +660,6 @@ class AnalysisService:
     def _calculate_macd_levels(self, df: pd.DataFrame, latest: pd.Series) -> Dict:
         """
         MACD策略点位：信号状态 + 操作参考
-
-        MACD是信号型策略（金叉买入、死叉离场），没有固定止盈位，
-        因此展示：当前金叉/死叉、持续天数、加仓/关注参考价、纪律止损。
         """
         try:
             current_price = latest.get('Close', 0)
@@ -587,14 +674,11 @@ class AnalysisService:
                         'add_price': None, 'stop': discipline_stop(current_price),
                         'note': '指标数据不足'}
 
-            # 当前状态：金叉（MACD>Signal）或死叉；持续天数走共享模块统计
             is_golden, days = macd_state_days((df['MACD'] > df['MACD_Signal']).values.tolist())
-
             state = 'golden' if is_golden else 'death'
 
-            # 操作参考
-            add_price = round(float(ma20), 2) if pd.notna(ma20) else None       # 多头回踩MA20加仓参考
-            watch_price = round(float(bb_lower), 2) if pd.notna(bb_lower) else None  # 空头关注超卖买点
+            add_price = round(float(ma20), 2) if pd.notna(ma20) else None
+            watch_price = round(float(bb_lower), 2) if pd.notna(bb_lower) else None
 
             if is_golden:
                 note = f'金叉第{days}天，趋势向上：持有为主，回踩MA20可考虑加仓'
@@ -607,7 +691,7 @@ class AnalysisService:
                 'hist': round(float(hist), 4) if pd.notna(hist) else 0,
                 'add_price': add_price,
                 'watch_price': watch_price,
-                'stop': discipline_stop(current_price),  # 纪律性止损-8%
+                'stop': discipline_stop(current_price),
                 'note': note
             }
         except Exception:

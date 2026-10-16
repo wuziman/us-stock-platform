@@ -21,8 +21,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install pandas numpy requests openpyxl yfinance
+        run: pip install -r requirements.txt
 
       - name: Run Weekly Hard Tech Screener
         run: python tech_stock_screener.py

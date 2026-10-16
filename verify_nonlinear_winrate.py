@@ -1,16 +1,16 @@
 """
 量化策略真实胜率与回测系统 (Walk-Forward 真实步进式回测)
 彻底剔除未来函数与虚高假设：
-1. 逐日动态计算挂单买入点（杜绝静态历史价格穿越）
+1. 逐日动态计算挂单买入点（杜绝静态历史价格穿越，复用后端 price_levels 统一买点公式）
 2. 逐日最低价 Low <= 买入价判定真实成交
 3. 严格日内路径判定（-8% 止损优先、+15%/+46% 止盈、超时强平）
 4. 单标的独占仓位状态机（杜绝连续重叠虚假交易）
-5. 支持同时对比【线性策略】与【非线性策略】真实胜率、盈亏比与最大回撤
+5. 支持同时对比【线性策略】与【非线性策略】真实胜率、盈亏比与最大回撤，并将最新实测画像自动保存至 data/stock_profiles.json
 """
 
+import json
 import os
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -24,6 +24,29 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+BASE_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = BASE_DIR / "stock-platform" / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+try:
+    from app.utils.price_levels import (
+        linear_buy_point,
+        nonlinear_buy_point,
+        LINEAR_PROFIT_PCT,
+        NONLINEAR_PROFIT_PCT,
+        STOP_PCT,
+    )
+except ImportError:
+    LINEAR_PROFIT_PCT = 1.15
+    NONLINEAR_PROFIT_PCT = 1.46
+    STOP_PCT = 0.92
+    def linear_buy_point(current: float, ma20: float) -> float:
+        buy = current - 0.5 * (current - ma20) if ma20 < current else current * 0.95
+        return min(buy, current * 0.95)
+    def nonlinear_buy_point(rsi: float, ma20: float, bb_lower: float) -> float:
+        return bb_lower if rsi < 30.0 else ma20
+
 
 def fetch_stock_history(stock_code: str, period: str = "2y") -> pd.DataFrame:
     """获取历史行情数据，若网络受阻则自动从本地 Excel 兜底"""
@@ -35,7 +58,7 @@ def fetch_stock_history(stock_code: str, period: str = "2y") -> pd.DataFrame:
         print(f"  [yfinance] 获取 {stock_code} 异常: {e}")
 
     if df is None or df.empty:
-        candidates = list(Path('.').glob(f"**/{stock_code}*_data.xlsx"))
+        candidates = list(BASE_DIR.glob(f"**/{stock_code}*_data.xlsx"))
         if candidates:
             df = pd.read_excel(candidates[0])
             if 'Date' in df.columns:
@@ -72,13 +95,13 @@ def simulate_strategy_walk_forward(df: pd.DataFrame, strategy_type: str = "nonli
 
     # 策略参数配置
     if strategy_type == "linear":
-        take_profit_ratio = 1.15  # +15%
-        stop_loss_ratio = 0.92    # -8%
-        max_holding_days = 30     # 最长持有30个交易日
+        take_profit_ratio = LINEAR_PROFIT_PCT  # +15%
+        stop_loss_ratio = STOP_PCT             # -8%
+        max_holding_days = 30                  # 最长持有30个交易日
     else:
-        take_profit_ratio = 1.46  # +46%
-        stop_loss_ratio = 0.92    # -8%
-        max_holding_days = 60     # 最长持有60个交易日
+        take_profit_ratio = NONLINEAR_PROFIT_PCT  # +46%
+        stop_loss_ratio = STOP_PCT                # -8%
+        max_holding_days = 60                     # 最长持有60个交易日
 
     # 2. 状态机逐日步进模拟
     position = 0  # 0=空仓, 1=持仓
@@ -105,23 +128,16 @@ def simulate_strategy_walk_forward(df: pd.DataFrame, strategy_type: str = "nonli
 
         # === 状态 1：空仓状态，判断今天是否能撮合成交 ===
         if position == 0:
-            # 严格根据昨天收盘时的指标，推算今天的挂单买入价
+            # 严格根据昨天收盘时的指标，推算今天的挂单买入价（走 price_levels 统一定义）
             if strategy_type == "linear":
-                if prev['MA20'] < prev['Close']:
-                    price_range = prev['Close'] - prev['MA20']
-                    pending_buy = prev['Close'] - 0.5 * price_range
-                else:
-                    pending_buy = prev['Close'] * 0.95
-                pending_buy = min(pending_buy, prev['Close'] * 0.95)
+                pending_buy = linear_buy_point(float(prev['Close']), float(prev['MA20']))
             else:
-                if prev['RSI'] < 30:
-                    pending_buy = prev['BB_lower']
-                else:
-                    pending_buy = prev['MA20']
+                pending_buy = nonlinear_buy_point(
+                    float(prev['RSI']), float(prev['MA20']), float(prev['BB_lower'])
+                )
 
             # 判断今天日内是否跌到挂单买入价 (Low <= pending_buy)
             if curr_low <= pending_buy and pending_buy > 0:
-                # 撮合成交（保守成交：若开盘直接跳空在买点下方，按开盘价买入；否则按挂单价买入）
                 fill_price = curr_open if curr_open < pending_buy else pending_buy
                 position = 1
                 entry_price = fill_price
@@ -140,15 +156,12 @@ def simulate_strategy_walk_forward(df: pd.DataFrame, strategy_type: str = "nonli
             # 风险优先法则：先判断是否被日内砸盘击穿止损线 (-8%)
             if curr_low <= stop_price:
                 exit_trade = True
-                # 若开盘直接跌破止损线，按开盘价止损；否则按止损价止损
                 exit_price = curr_open if curr_open < stop_price else stop_price
                 exit_reason = "STOP_LOSS"
-            # 止盈判定：是否达到止盈目标位 (+15% 或 +46%)
             elif curr_high >= profit_price:
                 exit_trade = True
                 exit_price = curr_open if curr_open > profit_price else profit_price
                 exit_reason = "TAKE_PROFIT"
-            # 超时强平：到达最长持有天数
             elif holding_days >= max_holding_days:
                 exit_trade = True
                 exit_price = curr_close
@@ -170,7 +183,6 @@ def simulate_strategy_walk_forward(df: pd.DataFrame, strategy_type: str = "nonli
                     'is_win': is_win
                 })
 
-                # 重置为空仓
                 position = 0
                 entry_price = 0.0
                 holding_days = 0
@@ -209,13 +221,13 @@ def simulate_strategy_walk_forward(df: pd.DataFrame, strategy_type: str = "nonli
         'total_trades': total_trades,
         'wins_count': len(wins),
         'losses_count': len(losses),
-        'win_rate': win_rate,
-        'avg_return': avg_return,
-        'avg_win': avg_win,
-        'avg_loss': avg_loss,
-        'profit_factor': profit_factor,
-        'max_drawdown': max_dd,
-        'cum_return': (equity - 1.0) * 100,
+        'win_rate': float(win_rate),
+        'avg_return': float(avg_return),
+        'avg_win': float(avg_win),
+        'avg_loss': float(avg_loss),
+        'profit_factor': float(profit_factor),
+        'max_drawdown': float(max_dd),
+        'cum_return': float((equity - 1.0) * 100),
         'trades': trades
     }
 
@@ -241,6 +253,7 @@ def main():
 
     all_linear_results = []
     all_nonlinear_results = []
+    dynamic_profiles = {}
 
     for code, name in stocks:
         print(f"\n正在回测: {code} ({name})...")
@@ -261,8 +274,24 @@ def main():
             all_linear_results.append(res_linear)
             all_nonlinear_results.append(res_nonlinear)
 
+            # 生成动态实测画像供日报脚本自动加载
+            best_res = res_nonlinear if res_nonlinear['cum_return'] >= res_linear['cum_return'] else res_linear
+            strat_label = "非线性" if best_res is res_nonlinear else "线性"
+            dynamic_profiles[code] = {
+                'stat': f"{strat_label}胜率 {best_res['win_rate']:.1f}% | 盈亏比 {best_res['profit_factor']:.2f}:1 | 累计 {best_res['cum_return']:+.1f}%",
+            }
+
             print(f"  [线性策略]   交易: {res_linear['total_trades']:2d}次 | 胜率: {res_linear['win_rate']:5.1f}% | 均单收益: {res_linear['avg_return']:+5.2f}% | 累计: {res_linear['cum_return']:+6.1f}% | 最大回撤: {res_linear['max_drawdown']:4.1f}%")
             print(f"  [非线性策略] 交易: {res_nonlinear['total_trades']:2d}次 | 胜率: {res_nonlinear['win_rate']:5.1f}% | 均单收益: {res_nonlinear['avg_return']:+5.2f}% | 累计: {res_nonlinear['cum_return']:+6.1f}% | 最大回撤: {res_nonlinear['max_drawdown']:4.1f}%")
+
+    # 持久化最新动态画像至 data/stock_profiles.json
+    if dynamic_profiles:
+        data_dir = BASE_DIR / "data"
+        data_dir.mkdir(exist_ok=True)
+        profile_path = data_dir / "stock_profiles.json"
+        with open(profile_path, 'w', encoding='utf-8') as f:
+            json.dump(dynamic_profiles, f, ensure_ascii=False, indent=2)
+        print(f"\n📁 已将最新 2 年实测画像更新至: {profile_path}")
 
     # 打印汇总排行榜
     print("\n" + "=" * 90)
@@ -279,21 +308,6 @@ def main():
         print(f"{'非线性(+46%止盈)':<10} {r['code']+' '+r['name']:<18} {r['win_rate']:>7.1f}%  {r['total_trades']:>6d}笔    {r['profit_factor']:>6.2f}:1  {r['avg_return']:>+7.2f}%  {r['cum_return']:>+8.1f}%  {r['max_drawdown']:>7.1f}%")
 
     print("=" * 90)
-
-    # 统计均值
-    if all_linear_results and all_nonlinear_results:
-        lin_avg_wr = np.mean([r['win_rate'] for r in all_linear_results])
-        lin_avg_cum = np.mean([r['cum_return'] for r in all_linear_results])
-        lin_avg_dd = np.mean([r['max_drawdown'] for r in all_linear_results])
-
-        non_avg_wr = np.mean([r['win_rate'] for r in all_nonlinear_results])
-        non_avg_cum = np.mean([r['cum_return'] for r in all_nonlinear_results])
-        non_avg_dd = np.mean([r['max_drawdown'] for r in all_nonlinear_results])
-
-        print("\n【大盘全标的平均量化画像】")
-        print(f"• 线性策略（高频温和型）：平均真实胜率 {lin_avg_wr:.1f}% | 平均累计收益 {lin_avg_cum:+.1f}% | 平均最大回撤 {lin_avg_dd:.1f}%")
-        print(f"• 非线性策略（波段大肉型）：平均真实胜率 {non_avg_wr:.1f}% | 平均累计收益 {non_avg_cum:+.1f}% | 平均最大回撤 {non_avg_dd:.1f}%")
-        print("💡 结论分析：非线性策略通过高赔率（+46%止盈 vs -8%止损）在真实交易中大幅跑赢震荡小波段，胜率虽从虚假的85%回归到理性的真实区间，但盈亏比与净值曲线更具抗风险能力！")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Row, Col, Statistic, Table, Tag, Spin, message, Button, Modal, Alert, Space, Switch, TimePicker, Popconfirm } from 'antd';
+import { Card, Row, Col, Statistic, Table, Tag, Spin, message, Button, Modal, Alert, Space, Switch, TimePicker, Popconfirm, Input } from 'antd';
 import {
   ArrowUpOutlined,
   ArrowDownOutlined,
@@ -8,21 +8,27 @@ import {
   SendOutlined,
   SaveOutlined,
   ThunderboltOutlined,
-  DeleteOutlined
+  DeleteOutlined,
+  PlusOutlined
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
 import { portfolioApi, stockApi, reportApi, errDetail } from '../services/api';
-import type { EarningsItem, MarketRegimeResponse, PositionSummary, WatchlistItem } from '../types/api';
+import type { EarningsItem, MarketRegimeResponse, Position, PositionSummary, SearchResult, WatchlistItem } from '../types/api';
 import { scheduleApi } from '../services/scheduleApi';
 import { colors } from '../theme/tokens';
+import { currencySymbol } from '../utils/format';
 
 const Home: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<PositionSummary | null>(null);
+  const [positions, setPositions] = useState<Position[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+  const [quickSearchQuery, setQuickSearchQuery] = useState('');
+  const [quickSearchResults, setQuickSearchResults] = useState<SearchResult[]>([]);
+  const [quickSearching, setQuickSearching] = useState(false);
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [reportText, setReportText] = useState('');
   const [reportLoading, setReportLoading] = useState(false);
@@ -49,15 +55,17 @@ const Home: React.FC = () => {
   const fetchData = async () => {
     setLoading(true);
     // 分区加载：任一接口失败只标记对应分区，避免把失败渲染成全零仪表盘
-    const [summaryRes, watchlistRes] = await Promise.allSettled([
+    const [summaryRes, watchlistRes, positionsRes] = await Promise.allSettled([
       portfolioApi.getSummary(),
-      stockApi.getWatchlist()
+      stockApi.getWatchlist(),
+      portfolioApi.getPositions(),
     ]);
     const failed: { summary?: boolean; watchlist?: boolean } = {};
     if (summaryRes.status === 'fulfilled') setSummary(summaryRes.value.data);
     else failed.summary = true;
     if (watchlistRes.status === 'fulfilled') setWatchlist(watchlistRes.value.data);
     else failed.watchlist = true;
+    if (positionsRes.status === 'fulfilled') setPositions(positionsRes.value.data || []);
     setLoadErrors(failed);
     setLoading(false);
   };
@@ -97,6 +105,39 @@ const Home: React.FC = () => {
       .then((res) => setEarningsItems(res.data.items || []))
       .catch(() => {});
   }, []);
+
+  const handleQuickSearch = async (val: string) => {
+    if (!val.trim()) {
+      setQuickSearchResults([]);
+      return;
+    }
+    setQuickSearching(true);
+    try {
+      const res = await stockApi.search(val.trim(), 'all');
+      setQuickSearchResults(res.data.results.slice(0, 6));
+    } catch {
+      message.error('搜索失败');
+    } finally {
+      setQuickSearching(false);
+    }
+  };
+
+  const handleQuickAddWatch = async (s: SearchResult) => {
+    try {
+      await stockApi.addToWatchlist({
+        stock_code: s.code,
+        stock_name: s.name,
+        market: s.market,
+      });
+      message.success(`已添加 ${s.code} ${s.name}`);
+      setQuickSearchResults([]);
+      setQuickSearchQuery('');
+      fetchData();
+      fetchQuotes();
+    } catch (error) {
+      message.error(errDetail(error, '添加失败'));
+    }
+  };
 
   const handleRemoveWatch = async (id: number) => {
     try {
@@ -215,22 +256,45 @@ const Home: React.FC = () => {
 
   const getPortfolioChartOption = () => {
     if (!summary) return {};
-    // 资产分布 = 持仓市值 + 现金。此前把"浮动亏损"（已含在市值内）与市值并列，
-    // 既双重计数又误用绿色切片，与全页盈亏语义冲突
     const capital = summary.total_capital || 0;
-    const data: Array<{ value: number; name: string; itemStyle: { color: string } }> = [
-      { value: Math.max(summary.total_value, 0), name: '持仓市值', itemStyle: { color: colors.primary } },
-    ];
-    if (capital > 0) {
-      data.push({ value: Math.max(capital - summary.total_value, 0), name: '现金', itemStyle: { color: colors.chartNeutral } });
+    const palette = [colors.primary, colors.chartPurple, colors.ma5, colors.profit, '#13c2c2', '#eb2f96'];
+    const data: Array<{ value: number; name: string; itemStyle?: { color: string } }> = [];
+
+    if (positions.length > 0) {
+      const hasMixed = positions.some(p => p.market === 'A') && positions.some(p => p.market !== 'A');
+      positions.forEach((p, idx) => {
+        const px = p.current_price ?? p.buy_price;
+        const scale = hasMixed && p.market === 'A' ? 1 / 7.2 : 1;
+        const val = Math.round(px * p.quantity * scale * 100) / 100;
+        if (val > 0) {
+          data.push({
+            value: val,
+            name: `${p.stock_code} ${p.stock_name}`,
+            itemStyle: { color: palette[idx % palette.length] },
+          });
+        }
+      });
+    } else {
+      data.push({ value: Math.max(summary.total_value, 0), name: '持仓市值', itemStyle: { color: colors.primary } });
+    }
+
+    if (capital > 0 && capital > summary.total_value) {
+      data.push({
+        value: Math.round((capital - summary.total_value) * 100) / 100,
+        name: '现金储备',
+        itemStyle: { color: colors.chartNeutral }
+      });
     }
     return {
-      tooltip: { trigger: 'item' },
-      legend: { bottom: 0 },
+      tooltip: {
+        trigger: 'item',
+        formatter: '{b}: ${c} ({d}%)'
+      },
+      legend: { bottom: 0, type: 'scroll' },
       series: [{
         name: '资产分布',
         type: 'pie',
-        radius: '50%',
+        radius: ['36%', '64%'],
         data,
         emphasis: {
           itemStyle: { shadowBlur: 10, shadowOffsetX: 0, shadowColor: 'rgba(0, 0, 0, 0.5)' }
@@ -331,9 +395,9 @@ const Home: React.FC = () => {
 
       <Row gutter={16} style={{ marginTop: 16 }}>
         <Col xs={24} sm={12}>
-          <Card title="📈 资产分布" style={{ height: 420 }}>
+          <Card title="📈 资产分布（逐股占比 + 现金）" style={{ height: 440 }}>
             {summary && summary.total_positions > 0 ? (
-              <ReactEChartsCore echarts={echarts} option={getPortfolioChartOption()} style={{ height: 320 }} />
+              <ReactEChartsCore echarts={echarts} option={getPortfolioChartOption()} style={{ height: 340 }} />
             ) : (
               <div style={{ textAlign: 'center', padding: 50, color: colors.textSecondary }}>暂无持仓数据</div>
             )}
@@ -342,9 +406,37 @@ const Home: React.FC = () => {
         <Col xs={24} sm={12}>
           <Card
             title="⭐ 自选股"
-            style={{ height: 420 }}
-            extra={<span style={{ fontSize: 12, color: colors.textSecondary }}>点击行进入分析</span>}
+            style={{ height: 440 }}
+            extra={
+              <Input.Search
+                size="small"
+                placeholder="搜代码/名称秒加自选"
+                value={quickSearchQuery}
+                onChange={(e) => setQuickSearchQuery(e.target.value)}
+                onSearch={handleQuickSearch}
+                loading={quickSearching}
+                allowClear
+                style={{ width: 195 }}
+              />
+            }
           >
+            {quickSearchResults.length > 0 && (
+              <div style={{ marginBottom: 8, padding: '6px 8px', background: colors.bgLight, borderRadius: 6 }}>
+                <div style={{ fontSize: 11, color: colors.textSecondary, marginBottom: 4 }}>点击标签直接加入自选：</div>
+                <Space size={4} wrap>
+                  {quickSearchResults.map((s) => (
+                    <Tag
+                      key={`${s.market}-${s.code}`}
+                      color="blue"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => handleQuickAddWatch(s)}
+                    >
+                      <PlusOutlined /> {s.code} {s.name}
+                    </Tag>
+                  ))}
+                </Space>
+              </div>
+            )}
             {loadErrors.watchlist ? (
               <Alert
                 type="error"
@@ -358,7 +450,7 @@ const Home: React.FC = () => {
               rowKey="id"
               pagination={false}
               size="small"
-              scroll={{ y: 280 }}
+              scroll={{ y: quickSearchResults.length > 0 ? 225 : 285 }}
               onRow={(r: WatchlistItem) => ({
                 onClick: () => navigate(`/analysis?code=${r.stock_code}&name=${encodeURIComponent(r.stock_name)}&market=${r.market || 'US'}`),
                 style: { cursor: 'pointer' },
@@ -376,7 +468,7 @@ const Home: React.FC = () => {
                   title: '现价', key: 'price', width: 80,
                   render: (_: unknown, r: WatchlistItem) => {
                     const p = wlQuotes[r.stock_code]?.price;
-                    return p != null ? `$${Number(p).toFixed(2)}` : <span style={{ color: colors.textSecondary }}>--</span>;
+                    return p != null ? `${currencySymbol(r.market)}${Number(p).toFixed(2)}` : <span style={{ color: colors.textSecondary }}>--</span>;
                   }
                 },
                 {
@@ -395,9 +487,11 @@ const Home: React.FC = () => {
                 {
                   title: '', key: 'op', width: 50,
                   render: (_: unknown, r: WatchlistItem) => (
-                    <Popconfirm title="从自选股删除？" onConfirm={() => handleRemoveWatch(r.id)}>
-                      <Button type="text" size="small" danger aria-label="删除自选股" icon={<DeleteOutlined />} />
-                    </Popconfirm>
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <Popconfirm title="从自选股删除？" onConfirm={() => handleRemoveWatch(r.id)}>
+                        <Button type="text" size="small" danger aria-label="删除自选股" icon={<DeleteOutlined />} />
+                      </Popconfirm>
+                    </div>
                   )
                 }
               ]}

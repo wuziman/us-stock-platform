@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { AnalysisResult, HistoryItem, KlineBar, SearchResult } from '../types/api';
-import { fmtDist, fmtPx } from '../utils/format';
-import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table } from 'antd';
+import { calcPositionSize, currencySymbol, fmtDist, fmtPx } from '../utils/format';
+import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber } from 'antd';
 import { SearchOutlined, StarOutlined, StarFilled, LineChartOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
-import { stockApi, analysisApi } from '../services/api';
+import { stockApi, analysisApi, portfolioApi } from '../services/api';
 import { patternApi, SignalsResult } from '../services/patternApi';
 import { trackingApi, TrackingResult } from '../services/trackingApi';
 import { colors } from '../theme/tokens';
@@ -25,6 +25,10 @@ const Analysis: React.FC = () => {
   const [isInWatchlist, setIsInWatchlist] = useState(false);
   const [showMA, setShowMA] = useState(true);
   const [showBOLL, setShowBOLL] = useState(false);
+  const [showStrategyLines, setShowStrategyLines] = useState(true);
+  const [chartPeriod, setChartPeriod] = useState<string>('3mo');
+  const [subChartMode, setSubChartMode] = useState<'volume' | 'macd' | 'rsi'>('volume');
+  const [riskCapital, setRiskCapital] = useState<number>(100000);
   const [searchMarket, setSearchMarket] = useState('all');
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -51,16 +55,17 @@ const Analysis: React.FC = () => {
   };
 
   // 拉取K线/信号/追踪三路数据；只有最新一次调用允许写入state。
-  // 供切股与"重新加载"复用——重试只重拉数据，不清已算好的分析结果
-  const fetchChartData = async (stock: SearchResult) => {
+  // 供切股、周期切换与"重新加载"复用——重试只重拉数据，不清已算好的分析结果
+  const fetchChartData = async (stock: SearchResult, periodOverride?: string) => {
     const seq = ++selectSeqRef.current;
+    const pd = periodOverride || chartPeriod;
     setHistoryLoading(true);
     setHistoryError(null);
 
     // 历史K线、技术信号、评分追踪并行拉取
     const [historyRes, signalsRes, trackingRes] = await Promise.allSettled([
-      stockApi.getHistory(stock.code, stock.market, '3mo'),
-      patternApi.getSignals(stock.code, stock.market, '3mo'),
+      stockApi.getHistory(stock.code, stock.market, pd),
+      patternApi.getSignals(stock.code, stock.market, pd),
       trackingApi.getTracking(stock.code),
     ]);
     if (seq !== selectSeqRef.current) return; // 期间已切到其他股票，丢弃过期结果
@@ -80,6 +85,13 @@ const Analysis: React.FC = () => {
     }
   };
 
+  const handlePeriodChange = (newPeriod: string) => {
+    setChartPeriod(newPeriod);
+    if (selectedStock) {
+      fetchChartData(selectedStock, newPeriod);
+    }
+  };
+
   const handleSelectStock = (stock: SearchResult) => {
     setSelectedStock(stock);
     selectedStockRef.current = stock;
@@ -93,7 +105,7 @@ const Analysis: React.FC = () => {
     fetchChartData(stock);
   };
 
-  // 从URL恢复选中（首页自选股行点击跳转入口）；拉取最近分析快捷列表（失败静默）
+  // 从URL恢复选中（首页自选股行点击跳转入口）；拉取最近分析快捷列表与已设置的总资金（失败静默）
   useEffect(() => {
     const code = searchParams.get('code');
     if (code) {
@@ -105,6 +117,13 @@ const Analysis: React.FC = () => {
     }
     analysisApi.getHistory(undefined, 8)
       .then((res) => setRecentAnalyses(res.data || []))
+      .catch(() => {});
+    portfolioApi.getTotalCapital()
+      .then((res) => {
+        if (res.data?.total_capital && res.data.total_capital > 0) {
+          setRiskCapital(res.data.total_capital);
+        }
+      })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -220,6 +239,39 @@ const Analysis: React.FC = () => {
       });
     }
 
+    // 叠加当前策略挂单线（线性买点 / 非线性买点 / 止盈位 / 止损位）
+    if (showStrategyLines && analysisResult?.price_levels) {
+      const pl = analysisResult.price_levels;
+      if (pl.linear?.buy) {
+        srMarkData.push({
+          yAxis: pl.linear.buy,
+          lineStyle: { color: colors.primary, type: 'solid', width: 1.5 },
+          label: { formatter: `线性买 ${pl.linear.buy}`, position: 'insideStartTop', fontSize: 11, color: colors.primary }
+        });
+      }
+      if (pl.nonlinear?.buy && pl.nonlinear.buy !== pl.linear?.buy) {
+        srMarkData.push({
+          yAxis: pl.nonlinear.buy,
+          lineStyle: { color: colors.chartPurple, type: 'solid', width: 1.5 },
+          label: { formatter: `非线性买 ${pl.nonlinear.buy}`, position: 'insideStartBottom', fontSize: 11, color: colors.chartPurple }
+        });
+      }
+      if (pl.linear?.profit) {
+        srMarkData.push({
+          yAxis: pl.linear.profit,
+          lineStyle: { color: colors.profit, type: 'dotted', width: 1.2 },
+          label: { formatter: `止盈 ${pl.linear.profit}`, position: 'insideStartTop', fontSize: 10, color: colors.profit }
+        });
+      }
+      if (pl.linear?.stop) {
+        srMarkData.push({
+          yAxis: pl.linear.stop,
+          lineStyle: { color: colors.loss, type: 'dotted', width: 1.2 },
+          label: { formatter: `止损 ${pl.linear.stop}`, position: 'insideStartBottom', fontSize: 10, color: colors.loss }
+        });
+      }
+    }
+
     // 形态标记scatter（bullish在K线下方绿▲，bearish上方红▼，neutral上方灰菱形）
     const patternPoints: any[] = [];
     if (signals?.patterns?.length) {
@@ -287,19 +339,77 @@ const Analysis: React.FC = () => {
       });
     }
 
-    series.push({
-      name: '成交量',
-      type: 'bar',
-      xAxisIndex: 1,
-      yAxisIndex: 1,
-      data: volumes,
-      itemStyle: { color: colors.indicatorBlue, opacity: 0.7 }
-    });
-
-    const legendData = ['K线', '成交量'];
+    const legendData = ['K线'];
     if (showMA) legendData.push('MA5', 'MA20', 'MA50');
     if (showBOLL) legendData.push('BOLL上轨', 'BOLL中轨', 'BOLL下轨');
     if (patternPoints.length > 0) legendData.push('形态信号');
+
+    // 副图指标三选一：成交量 / MACD / RSI(14)
+    if (subChartMode === 'macd') {
+      series.push(
+        {
+          name: 'MACD柱',
+          type: 'bar',
+          xAxisIndex: 1,
+          yAxisIndex: 1,
+          data: historyData.map((d: KlineBar) => ({
+            value: d.macd_hist ?? 0,
+            itemStyle: { color: (d.macd_hist ?? 0) >= 0 ? colors.klineUp : colors.klineDown }
+          })),
+        },
+        {
+          name: 'DIF',
+          type: 'line',
+          xAxisIndex: 1,
+          yAxisIndex: 1,
+          color: colors.primary,
+          data: historyData.map((d: KlineBar) => d.macd),
+          symbol: 'none',
+          lineStyle: { width: 1.3, color: colors.primary }
+        },
+        {
+          name: 'DEA',
+          type: 'line',
+          xAxisIndex: 1,
+          yAxisIndex: 1,
+          color: colors.ma5,
+          data: historyData.map((d: KlineBar) => d.macd_signal),
+          symbol: 'none',
+          lineStyle: { width: 1.3, color: colors.ma5 }
+        }
+      );
+      legendData.push('MACD柱', 'DIF', 'DEA');
+    } else if (subChartMode === 'rsi') {
+      series.push({
+        name: 'RSI(14)',
+        type: 'line',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        color: colors.chartPurple,
+        data: historyData.map((d: KlineBar) => d.rsi),
+        symbol: 'none',
+        lineStyle: { width: 1.5, color: colors.chartPurple },
+        markLine: {
+          symbol: 'none',
+          silent: true,
+          data: [
+            { yAxis: 70, lineStyle: { color: colors.loss, type: 'dashed', width: 1 }, label: { formatter: '超买 70', fontSize: 10 } },
+            { yAxis: 30, lineStyle: { color: colors.profit, type: 'dashed', width: 1 }, label: { formatter: '超卖 30', fontSize: 10 } },
+          ]
+        }
+      });
+      legendData.push('RSI(14)');
+    } else {
+      series.push({
+        name: '成交量',
+        type: 'bar',
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        data: volumes,
+        itemStyle: { color: colors.indicatorBlue, opacity: 0.7 }
+      });
+      legendData.push('成交量');
+    }
 
     return {
       tooltip: {
@@ -315,7 +425,8 @@ const Analysis: React.FC = () => {
             } else if (p.seriesName === 'K线' && Array.isArray(p.value)) {
               html += `<br/>${p.marker}开:${p.value[1]} 收:${p.value[2]} 低:${p.value[3]} 高:${p.value[4]}`;
             } else if (p.value !== undefined && p.value !== null && !Array.isArray(p.value)) {
-              html += `<br/>${p.marker}${p.seriesName}: ${p.value}`;
+              const rawVal = typeof p.value === 'object' && p.value !== null ? p.value.value : p.value;
+              html += `<br/>${p.marker}${p.seriesName}: ${rawVal}`;
             }
           }
           return html;
@@ -335,7 +446,9 @@ const Analysis: React.FC = () => {
       ],
       yAxis: [
         { scale: true, gridIndex: 0 },
-        { scale: true, gridIndex: 1, splitNumber: 2 }
+        subChartMode === 'rsi'
+          ? { min: 0, max: 100, gridIndex: 1, splitNumber: 2 }
+          : { scale: true, gridIndex: 1, splitNumber: 2 }
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: 40, end: 100 },
@@ -606,13 +719,46 @@ const Analysis: React.FC = () => {
               )}
               {historyData.length > 0 ? (
                 <>
-                  <div style={{ marginBottom: 8 }}>
-                    <Checkbox checked={showMA} onChange={(e) => setShowMA(e.target.checked)}>均线 MA5/20/50</Checkbox>
-                    <Checkbox checked={showBOLL} onChange={(e) => setShowBOLL(e.target.checked)} style={{ marginLeft: 16 }}>
-                      布林带 BOLL
-                    </Checkbox>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                    <div>
+                      <Checkbox checked={showMA} onChange={(e) => setShowMA(e.target.checked)}>均线 MA5/20/50</Checkbox>
+                      <Checkbox checked={showBOLL} onChange={(e) => setShowBOLL(e.target.checked)} style={{ marginLeft: 12 }}>
+                        布林带 BOLL
+                      </Checkbox>
+                      {analysisResult && (
+                        <Checkbox checked={showStrategyLines} onChange={(e) => setShowStrategyLines(e.target.checked)} style={{ marginLeft: 12 }}>
+                          策略买点/止盈止损标线
+                        </Checkbox>
+                      )}
+                    </div>
+                    <Space size="small" wrap>
+                      <Select
+                        size="small"
+                        value={chartPeriod}
+                        onChange={handlePeriodChange}
+                        style={{ width: 92 }}
+                        options={[
+                          { value: '1mo', label: '近1个月' },
+                          { value: '3mo', label: '近3个月' },
+                          { value: '6mo', label: '近6个月' },
+                          { value: '1y', label: '近1年' },
+                          { value: '2y', label: '近2年' },
+                        ]}
+                      />
+                      <Select
+                        size="small"
+                        value={subChartMode}
+                        onChange={(v: 'volume' | 'macd' | 'rsi') => setSubChartMode(v)}
+                        style={{ width: 108 }}
+                        options={[
+                          { value: 'volume', label: '副图: 成交量' },
+                          { value: 'macd', label: '副图: MACD' },
+                          { value: 'rsi', label: '副图: RSI(14)' },
+                        ]}
+                      />
+                    </Space>
                   </div>
-                  <ReactEChartsCore echarts={echarts} option={getCandlestickOption()} style={{ height: 440 }} />
+                  <ReactEChartsCore echarts={echarts} option={getCandlestickOption()} style={{ height: 440 }} notMerge />
                 </>
               ) : historyError ? (
                 <div style={{ textAlign: 'center', padding: 50 }}>
@@ -687,10 +833,10 @@ const Analysis: React.FC = () => {
                   </Descriptions>
                 </Card>
 
-                <Card title="💰 三策略点位">
+                <Card title="💰 三策略点位" style={{ marginBottom: 16 }}>
                   <div style={{ textAlign: 'center', marginBottom: 16 }}>
                     <span style={{ fontSize: 20, fontWeight: 'bold' }}>
-                      当前价: {fmtPx(analysisResult.price_levels.current_price)}
+                      当前价: {fmtPx(analysisResult.price_levels.current_price, analysisResult.market)}
                     </span>
                   </div>
 
@@ -704,7 +850,7 @@ const Analysis: React.FC = () => {
                           <Descriptions column={1} size="small">
                             <Descriptions.Item label="买入价">
                               <span style={{ color: colors.success, fontWeight: 'bold' }}>
-                                {fmtPx(analysisResult.price_levels.linear.buy)}
+                                {fmtPx(analysisResult.price_levels.linear.buy, analysisResult.market)}
                               </span>
                               <Tag color="green" style={{ marginLeft: 8 }}>
                                 {fmtDist(analysisResult.price_levels.linear.distance)}
@@ -712,7 +858,7 @@ const Analysis: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="止盈位">
                               <span style={{ color: colors.primary }}>
-                                {fmtPx(analysisResult.price_levels.linear.profit)}
+                                {fmtPx(analysisResult.price_levels.linear.profit, analysisResult.market)}
                               </span>
                               <Tag color="blue" style={{ marginLeft: 8 }}>
                                 +15%
@@ -720,12 +866,41 @@ const Analysis: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="止损位">
                               <span style={{ color: colors.error }}>
-                                {fmtPx(analysisResult.price_levels.linear.stop)}
+                                {fmtPx(analysisResult.price_levels.linear.stop, analysisResult.market)}
                               </span>
                               <Tag color="red" style={{ marginLeft: 8 }}>
                                 -8%
                               </Tag>
                             </Descriptions.Item>
+                            {analysisResult.price_levels.linear.atr_stop != null && (
+                              <Descriptions.Item label="ATR自适应止损">
+                                <span style={{ color: colors.warning, fontWeight: 600 }}>
+                                  {fmtPx(analysisResult.price_levels.linear.atr_stop, analysisResult.market)}
+                                </span>
+                                <Tag color="orange" style={{ marginLeft: 8 }}>2×ATR动态</Tag>
+                              </Descriptions.Item>
+                            )}
+                            {analysisResult.price_levels.linear.breakeven_trigger != null && (
+                              <Descriptions.Item label="保本上移触发">
+                                <span>{fmtPx(analysisResult.price_levels.linear.breakeven_trigger, analysisResult.market)}</span>
+                                <Tag color="cyan" style={{ marginLeft: 8 }}>+10%上移保本</Tag>
+                              </Descriptions.Item>
+                            )}
+                            {(() => {
+                              const ps = calcPositionSize(
+                                riskCapital,
+                                analysisResult.price_levels.linear.buy,
+                                analysisResult.price_levels.linear.atr_stop ?? analysisResult.price_levels.linear.stop
+                              );
+                              return ps.recommendedShares > 0 ? (
+                                <Descriptions.Item label="2%风控建议仓位">
+                                  <b>{ps.recommendedShares}股</b>
+                                  <span style={{ fontSize: 12, color: colors.textSecondary, marginLeft: 6 }}>
+                                    (首仓{ps.firstTrancheShares}股 · 占{ps.positionPct}%)
+                                  </span>
+                                </Descriptions.Item>
+                              ) : null;
+                            })()}
                           </Descriptions>
                         )
                       },
@@ -736,7 +911,7 @@ const Analysis: React.FC = () => {
                           <Descriptions column={1} size="small">
                             <Descriptions.Item label="买入价">
                               <span style={{ color: colors.success, fontWeight: 'bold' }}>
-                                {fmtPx(analysisResult.price_levels.nonlinear.buy)}
+                                {fmtPx(analysisResult.price_levels.nonlinear.buy, analysisResult.market)}
                               </span>
                               <Tag color="green" style={{ marginLeft: 8 }}>
                                 {fmtDist(analysisResult.price_levels.nonlinear.distance)}
@@ -744,7 +919,7 @@ const Analysis: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="止盈位">
                               <span style={{ color: colors.primary }}>
-                                {fmtPx(analysisResult.price_levels.nonlinear.profit)}
+                                {fmtPx(analysisResult.price_levels.nonlinear.profit, analysisResult.market)}
                               </span>
                               <Tag color="blue" style={{ marginLeft: 8 }}>
                                 +46%
@@ -752,12 +927,41 @@ const Analysis: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="止损位">
                               <span style={{ color: colors.error }}>
-                                {fmtPx(analysisResult.price_levels.nonlinear.stop)}
+                                {fmtPx(analysisResult.price_levels.nonlinear.stop, analysisResult.market)}
                               </span>
                               <Tag color="red" style={{ marginLeft: 8 }}>
                                 -8%
                               </Tag>
                             </Descriptions.Item>
+                            {analysisResult.price_levels.nonlinear.atr_stop != null && (
+                              <Descriptions.Item label="ATR自适应止损">
+                                <span style={{ color: colors.warning, fontWeight: 600 }}>
+                                  {fmtPx(analysisResult.price_levels.nonlinear.atr_stop, analysisResult.market)}
+                                </span>
+                                <Tag color="orange" style={{ marginLeft: 8 }}>2.2×ATR动态</Tag>
+                              </Descriptions.Item>
+                            )}
+                            {analysisResult.price_levels.nonlinear.breakeven_trigger != null && (
+                              <Descriptions.Item label="保本上移触发">
+                                <span>{fmtPx(analysisResult.price_levels.nonlinear.breakeven_trigger, analysisResult.market)}</span>
+                                <Tag color="cyan" style={{ marginLeft: 8 }}>+10%上移保本</Tag>
+                              </Descriptions.Item>
+                            )}
+                            {(() => {
+                              const ps = calcPositionSize(
+                                riskCapital,
+                                analysisResult.price_levels.nonlinear.buy,
+                                analysisResult.price_levels.nonlinear.atr_stop ?? analysisResult.price_levels.nonlinear.stop
+                              );
+                              return ps.recommendedShares > 0 ? (
+                                <Descriptions.Item label="2%风控建议仓位">
+                                  <b>{ps.recommendedShares}股</b>
+                                  <span style={{ fontSize: 12, color: colors.textSecondary, marginLeft: 6 }}>
+                                    (首仓{ps.firstTrancheShares}股 · 占{ps.positionPct}%)
+                                  </span>
+                                </Descriptions.Item>
+                              ) : null;
+                            })()}
                           </Descriptions>
                         )
                       },
@@ -785,7 +989,7 @@ const Analysis: React.FC = () => {
                                 {isGolden && m.add_price && (
                                   <Descriptions.Item label="加仓参考">
                                     <span style={{ color: colors.success, fontWeight: 'bold' }}>
-                                      ${m.add_price}
+                                      {currencySymbol(analysisResult.market)}{m.add_price}
                                     </span>
                                     <Tag color="green" style={{ marginLeft: 8 }}>回踩MA20</Tag>
                                   </Descriptions.Item>
@@ -793,7 +997,7 @@ const Analysis: React.FC = () => {
                                 {!isGolden && m.watch_price && (
                                   <Descriptions.Item label="关注买点">
                                     <span style={{ color: colors.warning, fontWeight: 'bold' }}>
-                                      ${m.watch_price}
+                                      {currencySymbol(analysisResult.market)}{m.watch_price}
                                     </span>
                                     <Tag color="orange" style={{ marginLeft: 8 }}>布林下轨</Tag>
                                   </Descriptions.Item>
@@ -806,7 +1010,7 @@ const Analysis: React.FC = () => {
                                   </Descriptions.Item>
                                 )}
                                 <Descriptions.Item label="纪律止损">
-                                  <span style={{ color: colors.error }}>${m.stop}</span>
+                                  <span style={{ color: colors.error }}>{currencySymbol(analysisResult.market)}{m.stop}</span>
                                   <Tag color="red" style={{ marginLeft: 8 }}>-8%</Tag>
                                 </Descriptions.Item>
                               </Descriptions>
@@ -820,7 +1024,19 @@ const Analysis: React.FC = () => {
                     ]}
                   />
 
-                  <Divider />
+                  <Divider style={{ margin: '10px 0' }} />
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: colors.textSecondary, marginBottom: 6 }}>
+                    <span>🧮 仓位试算总资金 ({currencySymbol(analysisResult.market)})：</span>
+                    <InputNumber<number>
+                      size="small"
+                      min={1000}
+                      step={10000}
+                      value={riskCapital}
+                      onChange={(v) => setRiskCapital(v || 100000)}
+                      style={{ width: 125 }}
+                    />
+                  </div>
 
                   <div style={{ textAlign: 'center', color: '#666', fontSize: 12 }}>
                     线性: 机会多 | 非线性: 胜率高 | MACD: 长期回测最优

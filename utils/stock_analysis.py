@@ -7,11 +7,25 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 import json
 from pathlib import Path
 import os
+import sys
+
+# 引入后端共享模块（若可用）
+_BASE_DIR = Path(__file__).resolve().parent.parent
+_BACKEND_DIR = _BASE_DIR / "stock-platform" / "backend"
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+try:
+    from app.services.tech_score import calculate_tech_score
+    from app.utils.indicators import calculate_all_indicators
+except Exception:
+    calculate_tech_score = None
+    calculate_all_indicators = None
 
 
 class StockAnalyzer:
@@ -30,7 +44,6 @@ class StockAnalyzer:
             with open(config_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except FileNotFoundError:
-            print(f"配置文件未找到: {config_path}")
             return {}
 
     def analyze_stock(self, stock_code: str, stock_name: str, mode: str = "simple") -> Dict:
@@ -39,7 +52,7 @@ class StockAnalyzer:
         返回：评分、推荐等级、建议买入价、止盈位、止损位
 
         参数：
-            mode: "simple"（简单版，只用技术面）或 "research"（研究验证版，四维度）
+            mode: "simple"（简单版，技40%+新30%+宏15%+事15%）或 "research"（研究验证版，技35%+新15%+宏25%+事25%）
         """
         print(f"\n{'='*60}")
         print(f"正在分析: {stock_code} {stock_name} [{mode}版]")
@@ -63,26 +76,21 @@ class StockAnalyzer:
 
         # 计算综合评分（根据模式选择权重）
         if mode == "research":
-            # 研究验证版：使用学术研究验证的权重
-            # 来源：Alpha Learning研究
-            # 技术面35% + 消息面15% + 宏观面25% + 事件驱动25%
             total_score = (
-                tech_score * 0.35 +  # 技术面35%
-                news_score * 0.15 +  # 消息面15%
-                macro_score * 0.25 +  # 宏观面25%
-                event_score * 0.25  # 事件驱动25%
+                tech_score * 0.35 +
+                news_score * 0.15 +
+                macro_score * 0.25 +
+                event_score * 0.25
             )
-            print(f"使用研究验证权重: 技35% + 新15% + 宏25% + 事25%")
+            print("使用研究验证权重: 技35% + 新15% + 宏25% + 事25%")
         else:
-            # 简单版：四维度加权（保持原有逻辑）
-            # 技术面40% + 消息面30% + 宏观面15% + 事件驱动15%
             total_score = (
-                tech_score * 0.4 +  # 技术面40%
-                news_score * 0.3 +  # 消息面30%
-                macro_score * 0.15 +  # 宏观面15%
-                event_score * 0.15  # 事件驱动15%
+                tech_score * 0.40 +
+                news_score * 0.30 +
+                macro_score * 0.15 +
+                event_score * 0.15
             )
-            print(f"使用简单版权重: 技40% + 新30% + 宏15% + 事15%")
+            print("使用简单版权重: 技40% + 新30% + 宏15% + 事15%")
 
         # 确定推荐等级
         recommendation = self._get_recommendation(total_score)
@@ -94,10 +102,10 @@ class StockAnalyzer:
             "stock_code": stock_code,
             "stock_name": stock_name,
             "scores": {
-                "technical": tech_score,
-                "news": news_score,
-                "macro": macro_score,
-                "event": event_score,
+                "technical": round(tech_score, 1),
+                "news": round(news_score, 1),
+                "macro": round(macro_score, 1),
+                "event": round(event_score, 1),
                 "total": round(total_score, 1)
             },
             "recommendation": recommendation,
@@ -112,86 +120,103 @@ class StockAnalyzer:
 
     def _analyze_technical(self, stock_code: str) -> Tuple[float, Dict]:
         """
-        技术面分析
-        包含：RSI、MACD、均线、布林带、K线形态
+        技术面分析（与后端 tech_score 统一：空头排列下禁用超卖加分，含本地 Excel 兜底）
         """
         try:
-            # 获取股票数据
-            stock = yf.Ticker(stock_code)
-            df = stock.history(period="3mo")
+            df = pd.DataFrame()
+            try:
+                stock = yf.Ticker(stock_code)
+                df = stock.history(period="3mo")
+            except Exception:
+                pass
 
-            if df.empty:
+            if df is None or df.empty:
+                candidates = list(_BASE_DIR.glob(f"**/{stock_code}*_data.xlsx"))
+                if candidates:
+                    df = pd.read_excel(candidates[0])
+                    if 'Date' in df.columns:
+                        df['Date'] = pd.to_datetime(df['Date'])
+                        df = df.set_index('Date')
+
+            if df is None or df.empty:
                 return 5.0, {"error": "无法获取数据"}
 
-            # 计算技术指标
-            # RSI
+            df = df.dropna(subset=['Close'])
+            if df.empty:
+                return 5.0, {"error": "收盘价为空"}
+
+            if calculate_all_indicators is not None and calculate_tech_score is not None:
+                df_ind = calculate_all_indicators(df)
+                latest = df_ind.iloc[-1]
+                score, base_details = calculate_tech_score(latest)
+                current_price = float(latest['Close'])
+                current_ma20 = float(latest['MA20']) if pd.notna(latest.get('MA20')) else current_price
+                current_ma50 = float(latest['MA50']) if pd.notna(latest.get('MA50')) else current_price
+                current_bb_upper = float(latest['BB_Upper']) if pd.notna(latest.get('BB_Upper')) else current_price * 1.1
+                current_bb_lower = float(latest['BB_Lower']) if pd.notna(latest.get('BB_Lower')) else current_price * 0.9
+                details = {
+                    **base_details,
+                    "current_price": round(current_price, 2),
+                    "ma20": round(current_ma20, 2),
+                    "ma50": round(current_ma50, 2),
+                    "bb_upper": round(current_bb_upper, 2),
+                    "bb_lower": round(current_bb_lower, 2),
+                    "support_levels": [round(current_bb_lower, 2), round(current_ma20, 2)],
+                    "resistance_levels": [round(current_bb_upper, 2), round(current_ma50, 2)]
+                }
+                return score, details
+
+            # 兜底计算（与 tech_score 规则一致）
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
+            rs = gain / loss.replace(0, np.nan)
             rsi = 100 - (100 / (1 + rs))
-            current_rsi = rsi.iloc[-1] if not rsi.empty else 50
+            rsi = np.where((loss == 0) & (gain > 0), 100.0, np.where((loss == 0) & (gain == 0), 50.0, rsi))
+            current_rsi = float(rsi[-1]) if len(rsi) > 0 else 50.0
 
-            # MACD
             exp1 = df['Close'].ewm(span=12, adjust=False).mean()
             exp2 = df['Close'].ewm(span=26, adjust=False).mean()
             macd = exp1 - exp2
             signal = macd.ewm(span=9, adjust=False).mean()
-            macd_hist = macd - signal
-            current_macd = macd.iloc[-1] if not macd.empty else 0
-            current_signal = signal.iloc[-1] if not signal.empty else 0
+            current_macd = float(macd.iloc[-1])
+            current_signal = float(signal.iloc[-1])
 
-            # 均线
             ma20 = df['Close'].rolling(window=20).mean()
             ma50 = df['Close'].rolling(window=50).mean()
-            current_price = df['Close'].iloc[-1]
-            current_ma20 = ma20.iloc[-1] if not ma20.empty else current_price
-            current_ma50 = ma50.iloc[-1] if not ma50.empty else current_price
+            current_price = float(df['Close'].iloc[-1])
+            current_ma20 = float(ma20.iloc[-1]) if pd.notna(ma20.iloc[-1]) else current_price
+            current_ma50 = float(ma50.iloc[-1]) if pd.notna(ma50.iloc[-1]) else current_price
 
-            # 布林带
             bb_middle = df['Close'].rolling(window=20).mean()
             bb_std = df['Close'].rolling(window=20).std()
             bb_upper = bb_middle + 2 * bb_std
             bb_lower = bb_middle - 2 * bb_std
-            current_bb_upper = bb_upper.iloc[-1] if not bb_upper.empty else current_price * 1.1
-            current_bb_lower = bb_lower.iloc[-1] if not bb_lower.empty else current_price * 0.9
+            current_bb_upper = float(bb_upper.iloc[-1]) if pd.notna(bb_upper.iloc[-1]) else current_price * 1.1
+            current_bb_lower = float(bb_lower.iloc[-1]) if pd.notna(bb_lower.iloc[-1]) else current_price * 0.9
 
-            # 计算技术面评分
-            score = 5.0  # 基础分
-
-            # RSI评分
-            if current_rsi < 30:
-                score += 2.0  # 超卖，买入机会
-            elif current_rsi < 40:
+            bearish_alignment = current_ma20 < current_ma50
+            score = 5.0
+            if current_rsi < 30 and not bearish_alignment:
+                score += 2.0
+            elif current_rsi < 40 and not bearish_alignment:
                 score += 1.0
             elif current_rsi > 70:
-                score -= 2.0  # 超买，卖出信号
+                score -= 2.0
             elif current_rsi > 60:
                 score -= 1.0
 
-            # MACD评分
-            if current_macd > current_signal:
-                score += 1.0  # 金叉，买入信号
-            else:
-                score -= 1.0  # 死叉，卖出信号
+            score += 1.0 if current_macd > current_signal else -1.0
+            score += 0.5 if current_price > current_ma20 else (-0.5 if current_price < current_ma20 else 0)
+            score += 0.5 if current_price > current_ma50 else (-0.5 if current_price < current_ma50 else 0)
+            score += 0.5 if current_ma20 > current_ma50 else (-0.5 if current_ma20 < current_ma50 else 0)
 
-            # 均线评分
-            if current_price > current_ma20:
-                score += 0.5  # 站上20日均线
-            if current_price > current_ma50:
-                score += 0.5  # 站上50日均线
-            if current_ma20 > current_ma50:
-                score += 0.5  # 均线多头排列
-
-            # 布林带评分
-            if current_price < current_bb_lower:
-                score += 1.0  # 跌破下轨，超卖
+            if current_price < current_bb_lower and not bearish_alignment:
+                score += 1.0
             elif current_price > current_bb_upper:
-                score -= 1.0  # 突破上轨，超买
+                score -= 1.0
 
-            # 限制评分范围
-            score = max(0, min(10, score))
-
+            score = max(0.0, min(10.0, score))
             details = {
                 "current_price": round(current_price, 2),
                 "rsi": round(current_rsi, 2),
@@ -204,7 +229,6 @@ class StockAnalyzer:
                 "support_levels": [round(current_bb_lower, 2), round(current_ma20, 2)],
                 "resistance_levels": [round(current_bb_upper, 2), round(current_ma50, 2)]
             }
-
             return score, details
 
         except Exception as e:
@@ -212,20 +236,16 @@ class StockAnalyzer:
             return 5.0, {"error": str(e)}
 
     def _analyze_news(self, stock_code: str, stock_name: str) -> Tuple[float, Dict]:
-        """
-        消息面分析
-        使用NewsAPI + 网页抓取
-        """
+        """消息面分析：NewsAPI + 关键词情感评分"""
         news_data = []
         score = 5.0
         details = {"sources": [], "sentiment": "中性"}
 
-        # 1. NewsAPI获取新闻
         try:
             if self.newsapi_key:
-                url = f"https://newsapi.org/v2/everything"
+                url = "https://newsapi.org/v2/everything"
                 params = {
-                    "q": f"{stock_name} OR {stock_code} stock",
+                    "q": f'"{stock_name}"',
                     "language": "en",
                     "sortBy": "publishedAt",
                     "pageSize": 10,
@@ -246,49 +266,31 @@ class StockAnalyzer:
         except Exception as e:
             print(f"NewsAPI获取失败: {e}")
 
-        # 2. 网页抓取（简化版）
-        try:
-            # 这里可以添加更多网页抓取逻辑
-            # 例如从Yahoo Finance、Google News等抓取
-            details["sources"].append("网页抓取")
-        except Exception as e:
-            print(f"网页抓取失败: {e}")
-
-        # 分析新闻情感（简化版）
         if len(news_data) > 3:
-            score += 1.0  # 新闻较多，关注度高
+            score += 1.0
         elif len(news_data) > 0:
             score += 0.5
         else:
-            score -= 0.5  # 没有新闻，关注度低
+            score -= 0.5
 
         details["news_count"] = len(news_data)
-        details["news"] = news_data[:3]  # 只保留前3条
-
-        return max(0, min(10, score)), details
+        details["news"] = news_data[:3]
+        return max(0.0, min(10.0, score)), details
 
     def _analyze_macro(self) -> Tuple[float, Dict]:
-        """
-        宏观面分析
-        使用FRED API + 网页抓取
-        """
+        """宏观面分析：使用 FRED API 获取联邦利率与失业率并动态打分"""
         score = 5.0
-        details = {"indicators": {}}
+        details = {"indicators": {}, "sources": []}
 
-        # 1. FRED API获取宏观数据
         try:
             if self.fred_key:
-                # 获取一些关键宏观经济指标
                 indicators = {
-                    "fed_rate": "DFF",  # 联邦基金利率
-                    "cpi": "CPIAUCSL",  # CPI
-                    "unemployment": "UNRATE",  # 失业率
-                    "gdp": "GDP"  # GDP
+                    "fed_rate": "DFF",
+                    "unemployment": "UNRATE",
                 }
-
                 for name, series_id in indicators.items():
                     try:
-                        url = f"https://api.stlouisfed.org/fred/series/observations"
+                        url = "https://api.stlouisfed.org/fred/series/observations"
                         params = {
                             "series_id": series_id,
                             "api_key": self.fred_key,
@@ -296,54 +298,63 @@ class StockAnalyzer:
                             "sort_order": "desc",
                             "limit": 1
                         }
-                        response = requests.get(url, params=params, timeout=10)
+                        response = requests.get(url, params=params, timeout=8)
                         if response.status_code == 200:
-                            data = response.json()
-                            observations = data.get("observations", [])
-                            if observations:
-                                details["indicators"][name] = observations[0].get("value")
+                            observations = response.json().get("observations", [])
+                            if observations and observations[0].get("value") not in (None, ".", ""):
+                                details["indicators"][name] = float(observations[0].get("value"))
                     except Exception as e:
                         print(f"获取{name}失败: {e}")
 
-                details["sources"] = ["FRED API"]
+                details["sources"].append("FRED API")
+                fed_rate = details["indicators"].get("fed_rate")
+                if fed_rate is not None:
+                    if fed_rate <= 3.75:
+                        score += 1.5
+                    elif fed_rate <= 4.75:
+                        score += 0.5
+                    else:
+                        score -= 0.5
+                unrate = details["indicators"].get("unemployment")
+                if unrate is not None:
+                    if unrate < 4.5:
+                        score += 0.5
+                    elif unrate > 5.5:
+                        score -= 0.5
         except Exception as e:
             print(f"FRED API获取失败: {e}")
 
-        # 2. 网页抓取（简化版）
-        try:
-            # 这里可以添加更多网页抓取逻辑
-            if "sources" not in details:
-                details["sources"] = []
-            details["sources"].append("网页抓取")
-        except Exception as e:
-            print(f"宏观面网页抓取失败: {e}")
-
-        # 简化评分逻辑
-        # 实际应该根据具体指标进行分析
-        score = 5.0  # 默认中性
-
-        return max(0, min(10, score)), details
+        return max(0.0, min(10.0, score)), details
 
     def _analyze_events(self, stock_code: str, stock_name: str) -> Tuple[float, Dict]:
-        """
-        事件驱动分析
-        网页抓取财经日历
-        """
+        """事件驱动分析：通过 yfinance 财报日历评估近期事件风险"""
         score = 5.0
         details = {"upcoming_events": [], "sources": []}
 
-        # 网页抓取财经日历（简化版）
         try:
-            # 这里可以添加从Investing.com、东方财富等抓取的逻辑
-            # 目前简化处理
-            details["sources"].append("网页抓取")
-        except Exception as e:
-            print(f"事件驱动分析失败: {e}")
+            cal = yf.Ticker(stock_code).calendar
+            ed = None
+            if isinstance(cal, dict) and cal.get("Earnings Date"):
+                ed = cal["Earnings Date"][0]
+            elif hasattr(cal, "get") and cal.get("Earnings Date"):
+                ed = cal.get("Earnings Date")[0]
+            if ed:
+                today = date.today()
+                ed_date = ed.date() if hasattr(ed, "date") else ed
+                if isinstance(ed_date, date):
+                    days = (ed_date - today).days
+                    details["sources"].append("yfinance")
+                    details["upcoming_events"].append({
+                        "name": "财报发布",
+                        "date": ed_date.isoformat(),
+                        "days_away": days
+                    })
+                    if 0 <= days <= 7:
+                        score -= 0.5
+        except Exception:
+            pass
 
-        # 简化评分逻辑
-        score = 5.0  # 默认中性
-
-        return max(0, min(10, score)), details
+        return max(0.0, min(10.0, score)), details
 
     def _get_recommendation(self, score: float) -> Dict:
         """根据评分确定推荐等级"""
@@ -359,128 +370,65 @@ class StockAnalyzer:
             return {"level": "不推荐", "action": "卖出", "confidence": "高"}
 
     def _calculate_price_levels(self, stock_code: str, tech_details: Dict) -> Dict:
-        """
-        计算价格点位（专业优化版）
-        基于最佳实践：
-        1. 买入点位：斐波那契回撤位 + 最大回调限制（5-8%）
-        2. 止损：ATR动态止损（1.5倍ATR）或支撑位
-        3. 止盈：风险回报比1:2 或 阻力位
-        """
+        """计算价格点位（斐波那契回撤位 + ATR动态止损）"""
         try:
             current_price = tech_details.get("current_price", 0)
             ma20 = tech_details.get("ma20", current_price)
-            ma50 = tech_details.get("ma50", current_price)
             bb_lower = tech_details.get("bb_lower", current_price * 0.9)
             bb_upper = tech_details.get("bb_upper", current_price * 1.1)
             support_levels = tech_details.get("support_levels", [])
             resistance_levels = tech_details.get("resistance_levels", [])
 
-            # 计算ATR（使用布林带宽度近似）
-            atr_approx = (bb_upper - bb_lower) / 4  # 布林带宽度/4 ≈ ATR
+            atr_approx = (bb_upper - bb_lower) / 4
+            max_buy_distance = 0.08
 
-            # ============================================
-            # 1. 买入点位计算（优化版）
-            # ============================================
-            # 策略：使用20日均线或近期低点，但不超过当前价的8%
-            max_buy_distance = 0.08  # 最大回调8%
-
-            # 计算斐波那契回撤位（基于近期波动）
-            # 使用20日均线作为近期波动的参考
             if ma20 < current_price:
-                # 如果20日均线低于当前价，使用20日均线作为参考
                 price_range = current_price - ma20
                 fib_382 = current_price - 0.382 * price_range
                 fib_500 = current_price - 0.500 * price_range
                 fib_618 = current_price - 0.618 * price_range
             else:
-                # 如果20日均线高于当前价，使用固定比例
-                fib_382 = current_price * 0.9618  # 3.82%回调
-                fib_500 = current_price * 0.95    # 5%回调
-                fib_618 = current_price * 0.9382  # 6.18%回调
+                fib_382 = current_price * 0.9618
+                fib_500 = current_price * 0.95
+                fib_618 = current_price * 0.9382
 
-            # 根据RSI判断趋势强度，选择合适的回撤位
             rsi = tech_details.get("rsi", 50)
-
             if rsi > 60:
-                # 强趋势（RSI>60），使用浅回调（38.2%）
-                fib_buy = fib_382
-                fib_level = "38.2%"
+                fib_buy, fib_level = fib_382, "38.2%"
             elif rsi > 45:
-                # 正常趋势，使用50%回调
-                fib_buy = fib_500
-                fib_level = "50%"
+                fib_buy, fib_level = fib_500, "50%"
             else:
-                # 弱趋势（RSI<45），使用深回调（61.8%）
-                fib_buy = fib_618
-                fib_level = "61.8%"
+                fib_buy, fib_level = fib_618, "61.8%"
 
-            # 同时考虑支撑位
             if support_levels:
-                # 找到距离当前价最近且在8%以内的支撑位
-                valid_supports = [s for s in support_levels if s <= current_price and s >= current_price * (1 - max_buy_distance)]
+                valid_supports = [s for s in support_levels if current_price * (1 - max_buy_distance) <= s <= current_price]
                 if valid_supports:
                     nearest_support = max(valid_supports)
-                    # 选择距离当前价最近的（斐波那契回撤位 vs 支撑位）
-                    if abs(nearest_support - current_price) < abs(fib_buy - current_price):
-                        buy_price = nearest_support
-                    else:
-                        buy_price = fib_buy
+                    buy_price = nearest_support if abs(nearest_support - current_price) < abs(fib_buy - current_price) else fib_buy
                 else:
                     buy_price = fib_buy
             else:
                 buy_price = fib_buy
 
-            # 最终限制：买入价不能超过当前价的8%
-            min_buy_price = current_price * (1 - max_buy_distance)
-            buy_price = max(buy_price, min_buy_price)
-
-            # 确保买入价不超过当前价（不能追高）
-            buy_price = min(buy_price, current_price)
-
-            # ============================================
-            # 2. 止损位计算（ATR动态止损）
-            # ============================================
-            # 策略：使用1.5倍ATR止损
+            buy_price = min(max(buy_price, current_price * (1 - max_buy_distance)), current_price)
             atr_stop = buy_price - 1.5 * atr_approx
 
-            # 同时考虑支撑位止损
             if support_levels:
                 valid_supports = [s for s in support_levels if s < buy_price]
-                if valid_supports:
-                    support_stop = max(valid_supports) * 0.98  # 支撑位下浮2%
-                    # 选择较大的止损（更保守）
-                    stop_loss = max(atr_stop, support_stop)
-                else:
-                    stop_loss = atr_stop
+                stop_loss = max(atr_stop, max(valid_supports) * 0.98) if valid_supports else atr_stop
             else:
                 stop_loss = atr_stop
 
-            # 确保止损不超过买入价的8%
             stop_loss = max(stop_loss, buy_price * 0.92)
-
-            # ============================================
-            # 3. 止盈位计算（风险回报比1:2）
-            # ============================================
-            # 计算风险金额
             risk = buy_price - stop_loss
-
-            # 风险回报比1:2
             take_profit_rr2 = buy_price + 2 * risk
 
-            # 同时考虑阻力位
             if resistance_levels:
-                # 找到距离当前价最近的阻力位
                 valid_resistance = [r for r in resistance_levels if r >= current_price]
-                if valid_resistance:
-                    nearest_resistance = min(valid_resistance)
-                    # 选择1:2风险回报比和阻力位中较小的一个
-                    take_profit = min(take_profit_rr2, nearest_resistance)
-                else:
-                    take_profit = take_profit_rr2
+                take_profit = min(take_profit_rr2, min(valid_resistance)) if valid_resistance else take_profit_rr2
             else:
                 take_profit = take_profit_rr2
 
-            # 确保止盈至少比买入价高5%
             take_profit = max(take_profit, buy_price * 1.05)
 
             return {
@@ -497,37 +445,18 @@ class StockAnalyzer:
         except Exception as e:
             print(f"价格点位计算失败: {e}")
             return {
-                "current_price": 0,
-                "buy_price": 0,
-                "take_profit": 0,
-                "stop_loss": 0,
-                "support_levels": [],
-                "resistance_levels": [],
-                "atr": 0,
-                "fib_level": "N/A",
-                "risk_reward_ratio": 0
+                "current_price": 0, "buy_price": 0, "take_profit": 0, "stop_loss": 0,
+                "support_levels": [], "resistance_levels": [], "atr": 0,
+                "fib_level": "N/A", "risk_reward_ratio": 0
             }
 
 
 def main():
     """主函数"""
     analyzer = StockAnalyzer()
-
-    # 分析示例股票
     result = analyzer.analyze_stock("MU", "美光科技")
-
     print("\n" + "="*60)
-    print("分析结果")
-    print("="*60)
-    print(f"股票: {result['stock_code']} {result['stock_name']}")
-    print(f"综合评分: {result['scores']['total']}/10")
-    print(f"推荐等级: {result['recommendation']['level']}")
-    print(f"建议操作: {result['recommendation']['action']}")
-    print(f"\n价格点位:")
-    print(f"  当前价: ${result['price_levels']['current_price']}")
-    print(f"  建议买入: ${result['price_levels']['buy_price']}")
-    print(f"  止盈位: ${result['price_levels']['take_profit']}")
-    print(f"  止损位: ${result['price_levels']['stop_loss']}")
+    print(f"股票: {result['stock_code']} {result['stock_name']} | 综合评分: {result['scores']['total']}/10")
 
 
 if __name__ == "__main__":

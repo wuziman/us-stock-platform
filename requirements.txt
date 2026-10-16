@@ -1,30 +1,23 @@
-# 数据获取
+# 数据获取与处理
 yfinance>=0.2.18
 pandas>=2.0.0
 numpy>=1.24.0
+openpyxl>=3.1.0
 
 # 技术指标
 ta>=0.10.2
-
-# 回测框架
-backtrader>=1.9.76.123
 
 # 可视化
 matplotlib>=3.7.0
 plotly>=5.14.0
 
-# 机器学习（可选）
-scikit-learn>=1.3.0
-
-# 其他工具
+# 网络与工具
 requests>=2.31.0
 python-dateutil>=2.8.0
 
-# API支持
+# 外部API与网页解析
 fredapi>=0.5.1
 newsapi-python>=0.2.7
-
-# 网页抓取
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 

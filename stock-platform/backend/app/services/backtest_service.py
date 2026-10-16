@@ -11,6 +11,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from .stock_service import StockService
 from ..utils.indicators import calculate_all_indicators
+from ..utils.price_levels import compute_trailing_stop
 
 
 # ============================================
@@ -56,12 +57,16 @@ class BacktestService:
     def run_backtest(self, stock_code: str, strategy: str, market: str = "US",
                      start_date: str = None, end_date: str = None,
                      initial_capital: float = 100000, period: str = "1y",
-                     commission_per_trade: float = 1.0) -> Dict:
+                     commission_per_trade: float = 1.0,
+                     trailing_stop: bool = False,
+                     staged_entry: bool = False,
+                     params: Optional[Dict] = None) -> Dict:
         """
         运行策略回测
 
         period: 数据区间 1y/3y/5y（A股走东方财富前复权日K）
         commission_per_trade: 每笔交易手续费（买入/卖出各收一次，默认$1）
+        params: 可选策略自定义参数（如寻优得到的最优 tp/sl 或 fast/slow）
         """
         df = self.stock_service.get_stock_data(stock_code, market, period=period)
         if df is None or df.empty:
@@ -79,10 +84,16 @@ class BacktestService:
         if len(df) < 51:
             return {'error': '数据不足'}
 
+        extra_params = dict(params) if params else {}
+        if trailing_stop:
+            extra_params['trailing_stop'] = True
+        if staged_entry:
+            extra_params['staged_entry'] = True
         result = self._execute_backtest(
             df=df, strategy=strategy, stock_code=stock_code,
             initial_capital=initial_capital, period=period,
             commission_per_trade=commission_per_trade,
+            params=extra_params if extra_params else None,
         )
         if start_date or end_date:
             # 自定义区间时返回实际窗口，前端据此展示，避免错标成"近1年"
@@ -155,11 +166,15 @@ class BacktestService:
         params = params or {}
         tp = abs(float(params.get('tp', 0.15)))
         sl = abs(float(params.get('sl', 0.08)))
+        use_trailing = bool(params.get('trailing_stop', False))
+        use_staged = bool(params.get('staged_entry', False))
         trades: List[Dict] = []
         equity_curve: List[Tuple[str, float]] = []
         capital = initial_capital
         position = 0
         buy_price = 0.0
+        highest_since_entry = 0.0
+        added_once = False
 
         for i in range(start, len(df)):
             current = df.iloc[i]
@@ -167,7 +182,7 @@ class BacktestService:
             current_price = current['Close']
             bought_this_bar = False  # 入场bar不判卖出：盘中先后顺序不可知，从次根bar起挂单生效
 
-            # --- 买入 ---
+            # --- 买入（支持一次性建仓或分批金字塔建仓）---
             if position == 0:
                 prev_ma20 = prev.get('MA20')
                 prev_close = prev['Close']
@@ -177,10 +192,13 @@ class BacktestService:
                     # 当日最低价触及买入位 → 成交于 min(开盘价, 买入位)
                     if current['Low'] <= buy_level:
                         fill_price = min(current['Open'], buy_level)
-                        shares = int(capital * 0.95 / fill_price)
+                        alloc_ratio = 0.50 if use_staged else 0.95
+                        shares = int(capital * alloc_ratio / fill_price)
                         if shares > 0:
                             position = shares
                             buy_price = fill_price
+                            highest_since_entry = float(current['High'])
+                            added_once = False
                             capital -= shares * fill_price + commission
                             bought_this_bar = True
                             trades.append({
@@ -190,16 +208,38 @@ class BacktestService:
                                 'shares': shares,
                                 'fee': commission
                             })
+            elif use_staged and not added_once and position > 0:
+                # 分批补仓：较首仓回撤5%时动用剩余资金补仓一次，摊低均价
+                add_trigger = buy_price * 0.95
+                if current['Low'] <= add_trigger:
+                    fill_price = min(current['Open'], add_trigger)
+                    add_shares = int((capital * 0.90) / fill_price)
+                    if add_shares > 0:
+                        total_cost = position * buy_price + add_shares * fill_price
+                        position += add_shares
+                        buy_price = total_cost / position
+                        added_once = True
+                        capital -= add_shares * fill_price + commission
+                        trades.append({
+                            'date': df.index[i].strftime('%Y-%m-%d'),
+                            'action': 'buy',
+                            'price': round(fill_price, 2),
+                            'shares': add_shares,
+                            'fee': commission
+                        })
 
             # --- 卖出（盘中路径判定，预挂单语义；同日双触发保守按止损优先）---
             if position > 0 and not bought_this_bar:
                 stop_level = buy_price * (1 - sl)
+                if use_trailing:
+                    stop_level = compute_trailing_stop(buy_price, highest_since_entry, stop_level)
                 tp_level = buy_price * (1 + tp)
                 sell_price = None
                 if current['Low'] <= stop_level:
                     sell_price = min(current['Open'], stop_level)   # 跳空低开按更差的开盘价
                 elif current['High'] >= tp_level:
                     sell_price = max(current['Open'], tp_level)     # 跳空高开按更好的开盘价
+                highest_since_entry = max(highest_since_entry, float(current['High']))
                 if sell_price is not None:
                     profit_pct = (sell_price - buy_price) / buy_price
                     capital += position * sell_price - commission
@@ -566,7 +606,9 @@ class BacktestService:
 
     def run_compare(self, stock_code: str, market: str = "US", period: str = "1y",
                     initial_capital: float = 100000,
-                    commission_per_trade: float = 1.0) -> Dict:
+                    commission_per_trade: float = 1.0,
+                    trailing_stop: bool = False,
+                    staged_entry: bool = False) -> Dict:
         """
         一键对比4个策略 + 买入持有基准。
         数据只拉取一次，4个策略在同一份数据上回测，保证可比性。
@@ -587,6 +629,12 @@ class BacktestService:
             ('macd', 'MACD'),
         ]
 
+        extra_params = {}
+        if trailing_stop:
+            extra_params['trailing_stop'] = True
+        if staged_entry:
+            extra_params['staged_entry'] = True
+
         strategies: Dict[str, Dict] = {}
         comparison: List[Dict] = []
         for key, name in strategy_names:
@@ -594,6 +642,7 @@ class BacktestService:
                 df=df, strategy=key, stock_code=stock_code,
                 initial_capital=initial_capital, period=period,
                 commission_per_trade=commission_per_trade,
+                params=extra_params if extra_params else None,
             )
             if 'error' in r:
                 return r

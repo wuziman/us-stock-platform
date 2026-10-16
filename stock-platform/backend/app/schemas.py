@@ -120,6 +120,9 @@ class BacktestRequest(BaseModel):
     end_date: Optional[str] = None
     initial_capital: float = 100000
     commission_per_trade: float = 1.0  # 每笔交易手续费（美元）
+    trailing_stop: bool = False        # 是否启用移动止盈与浮盈+10%保本损
+    staged_entry: bool = False         # 是否启用分批金字塔建仓（首仓50%+回撤5%补仓50%）
+    params: Optional[Dict[str, float]] = None  # 可选策略自定义参数（如寻优得到的最优tp/sl或fast/slow）
 
 
 class BacktestResponse(BaseModel):
@@ -148,6 +151,8 @@ class BacktestCompareRequest(BaseModel):
     period: str = "1y"
     initial_capital: float = 100000
     commission_per_trade: float = 1.0
+    trailing_stop: bool = False
+    staged_entry: bool = False
 
 
 class OptimizeRequest(BaseModel):

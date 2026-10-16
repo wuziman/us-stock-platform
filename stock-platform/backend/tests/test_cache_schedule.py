@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-自动化测试：K线缓存 + 定时日报决策逻辑
+自动化测试：K线缓存 + 过期缓存自动清理 + 定时日报决策逻辑
 运行：cd backend && python -m pytest tests/test_cache_schedule.py -v
 """
 import sys
@@ -167,6 +167,35 @@ class TestKlineCache:
             row = db.query(KlineCache).filter(
                 KlineCache.cache_key == f"US:{TEST_CODE}:3mo").first()
             assert row is None
+        finally:
+            db.close()
+
+    def test_cleanup_expired_kline_cache(self, monkeypatch):
+        """cleanup_expired_kline_cache 仅清理超过 max_age_hours 的陈旧记录，保留新鲜记录"""
+        monkeypatch.setattr(
+            stock_service, '_fetch_kline',
+            lambda code, market, period: make_fake_df())
+        StockService.get_stock_data(TEST_CODE, 'US', '3mo')
+        StockService.get_stock_data(TEST_CODE, 'US', '1y')
+
+        db = SessionLocal()
+        try:
+            old_row = db.query(KlineCache).filter(
+                KlineCache.cache_key == f"US:{TEST_CODE}:3mo").first()
+            old_row.fetched_at = datetime.now() - timedelta(hours=30)
+            db.commit()
+        finally:
+            db.close()
+
+        removed = stock_service.cleanup_expired_kline_cache(max_age_hours=24)
+        assert removed >= 1
+
+        db = SessionLocal()
+        try:
+            assert db.query(KlineCache).filter(
+                KlineCache.cache_key == f"US:{TEST_CODE}:3mo").first() is None
+            assert db.query(KlineCache).filter(
+                KlineCache.cache_key == f"US:{TEST_CODE}:1y").first() is not None
         finally:
             db.close()
 

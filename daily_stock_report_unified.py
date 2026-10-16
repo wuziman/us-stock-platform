@@ -1,7 +1,7 @@
 """
 每日股票分析报告 - 统一双策略与AI晨报升级版
-1. 真实四维评分（技术面 + NewsAPI/Gemini语义新闻 + FRED宏观 + 事件驱动）
-2. Google Gemini 3.7 Flash 30秒AI晨报精要
+1. 真实四维评分（技术面[复用后端空头排列防接刀评分] + NewsAPI/LLM语义新闻 + FRED宏观 + 事件驱动）
+2. 30秒AI晨报精要
 3. 企业微信分段双消息推送（消息①: AI晨报投研；消息②: 量化双策略点位表）
 4. 平滑降级与高可用容错
 """
@@ -11,10 +11,10 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -27,20 +27,60 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# 引入 stock-platform 后端服务的 LLM 客户端
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock-platform', 'backend'))
+# 引入 stock-platform 后端服务的共享模块（消除双轨实现漂移）
+BASE_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = BASE_DIR / 'stock-platform' / 'backend'
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 try:
     from app.services.llm_client import chat_completion, is_ai_configured
-except Exception as e:
+    from app.services.tech_score import calculate_tech_score
+    from app.utils.indicators import calculate_all_indicators
+    from app.utils.price_levels import (
+        LINEAR_PROFIT_PCT,
+        NONLINEAR_PROFIT_PCT,
+        atr_adaptive_levels,
+        levels_with_targets,
+        linear_buy_point,
+        nonlinear_buy_point,
+    )
+    from app.routers.stocks import pick_next_earnings_date
+except Exception:
     chat_completion = None
     def is_ai_configured():
         return False
+    calculate_tech_score = None
+    calculate_all_indicators = None
+    LINEAR_PROFIT_PCT = 1.15
+    NONLINEAR_PROFIT_PCT = 1.46
+    def linear_buy_point(current: float, ma20: float) -> float:
+        buy = current - 0.5 * (current - ma20) if ma20 < current else current * 0.95
+        return min(buy, current * 0.95)
+    def nonlinear_buy_point(rsi: float, ma20: float, bb_lower: float) -> float:
+        return bb_lower if rsi < 30.0 else ma20
+    def levels_with_targets(current: float, buy: float, profit_pct: float) -> dict:
+        return {
+            'buy': round(buy, 2),
+            'stop': round(buy * 0.92, 2),
+            'profit': round(buy * profit_pct, 2),
+            'distance': round((current - buy) / current * 100, 2) if current else 0.0,
+        }
+    def pick_next_earnings_date(candidates, today: date):
+        normalized = []
+        for d in candidates or []:
+            try:
+                normalized.append(d.date() if callable(getattr(d, 'date', None)) else d)
+            except Exception:
+                continue
+        future = [d for d in normalized if isinstance(d, date) and d >= today]
+        return min(future) if future else None
 
 
 def load_app_config() -> dict:
     """加载配置：优先读取系统环境变量，回退读取 config/config.json"""
     config = {}
-    config_path = Path("config/config.json")
+    config_path = BASE_DIR / "config" / "config.json"
     if config_path.exists():
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
@@ -56,7 +96,7 @@ def load_app_config() -> dict:
         api_keys["fred"] = os.environ.get("FRED_API_KEY")
     if os.environ.get("WECHAT_WEBHOOK"):
         config["wechat_webhook"] = os.environ.get("WECHAT_WEBHOOK")
-    
+
     # 针对 Gemini / OpenRouter 密钥支持环境变量传入
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("AI_API_KEY")
     if gemini_key:
@@ -165,7 +205,7 @@ def fetch_macro_data(fred_key: str):
 
         if resp.status_code == 200:
             obs = resp.json().get('observations', [])
-            if obs:
+            if obs and obs[0].get('value') not in (None, '.', ''):
                 indicators['fed_rate'] = float(obs[0]['value'])
 
         fed_rate = indicators.get('fed_rate')
@@ -247,14 +287,30 @@ def fetch_market_regime_and_circuit_breaker() -> dict:
 
 
 def fetch_news_and_evaluate_sentiment(stocks: list, newsapi_key: str):
-    """抓取各标的新闻并通过 Gemini 3.7 Flash 进行语义情感打分"""
+    """抓取各标的新闻并通过大模型进行语义情感打分（自动读取 config.json 配置模型，无硬编码）"""
     news_dict = {}
     degraded = False
 
-    # 1. 多线程并发抓取各标的新闻标题
-    if newsapi_key:
-        def _fetch_single_news(stock_tuple):
-            stock_code, stock_name = stock_tuple
+    # 1. 多线程并发抓取各标的新闻标题（融合 yfinance 实时个股新闻 + NewsAPI 双源）
+    def _fetch_single_news(stock_tuple):
+        stock_code, stock_name = stock_tuple
+        titles = []
+        seen = set()
+        # 优先拉取 yfinance 实时个股新闻（无需 Key、零延迟）
+        try:
+            raw_news = getattr(yf.Ticker(stock_code), 'news', None) or []
+            for item in raw_news[:4]:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get('content') if isinstance(item.get('content'), dict) else item
+                t = (content.get('title') or '').strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    titles.append(t)
+        except Exception:
+            pass
+        # 补充 NewsAPI
+        if newsapi_key and len(titles) < 4:
             try:
                 resp = requests.get(
                     "https://newsapi.org/v2/everything",
@@ -269,19 +325,22 @@ def fetch_news_and_evaluate_sentiment(stocks: list, newsapi_key: str):
                 )
                 if resp.status_code == 200:
                     articles = resp.json().get('articles', [])
-                    titles = [a.get('title', '').strip() for a in articles if a.get('title')]
-                    return stock_code, titles
+                    for a in articles:
+                        t = (a.get('title') or '').strip()
+                        if t and t.lower() not in seen:
+                            seen.add(t.lower())
+                            titles.append(t)
             except Exception:
                 pass
-            return stock_code, []
+        return stock_code, titles[:4]
 
-        with ThreadPoolExecutor(max_workers=min(8, len(stocks))) as executor:
-            for s_code, s_titles in executor.map(_fetch_single_news, stocks):
-                news_dict[s_code] = s_titles
-    else:
+    with ThreadPoolExecutor(max_workers=min(8, len(stocks))) as executor:
+        for s_code, s_titles in executor.map(_fetch_single_news, stocks):
+            news_dict[s_code] = s_titles
+    if not any(news_dict.values()) and not newsapi_key:
         degraded = True
 
-    # 2. 调用大模型进行语义打分与关键事件萃取
+    # 2. 调用大模型进行语义打分与关键事件萃取（不硬编码模型名，使用配置的主模型）
     llm_scores = {}
     if is_ai_configured():
         prompt_content = "你是一位资深美股量化分析师。请评估以下股票近期新闻的情感倾向，并给出评分与关键事件：\n\n"
@@ -299,11 +358,11 @@ def fetch_news_and_evaluate_sentiment(stocks: list, newsapi_key: str):
 说明：score 为 0.0 到 10.0 的浮点数，5.0 为中性，>5.0 为偏多利好，<5.0 为偏空。event 限15字以内。
 """
         try:
-            res_text = chat_completion([{"role": "user", "content": prompt_content}], max_tokens=6000, model='gemini-3.6-flash')
+            res_text = chat_completion([{"role": "user", "content": prompt_content}], max_tokens=6000)
             clean_json = re.sub(r'```json\s*|\s*```', '', res_text.strip())
             llm_scores = json.loads(clean_json)
         except Exception as ex:
-            print(f"[News-LLM] Gemini 情感打分异常: {ex}")
+            print(f"[News-LLM] 大模型情感打分异常: {ex}")
             degraded = True
 
     # 3. 汇总打分结果
@@ -328,9 +387,10 @@ def fetch_news_and_evaluate_sentiment(stocks: list, newsapi_key: str):
 
 
 def calculate_stock_technical_and_strategies(stock_code: str, stock_name: str):
-    """单次拉取历史数据，同时完成指标计算、技术面评分与双策略点位推算"""
+    """单次拉取历史数据，复用后端共享指标、技术面评分（含空头排列防接刀）与双策略点位推算"""
     try:
         data = pd.DataFrame()
+        stock = None
         try:
             stock = yf.Ticker(stock_code)
             data = stock.history(period="3mo")
@@ -339,7 +399,7 @@ def calculate_stock_technical_and_strategies(stock_code: str, stock_name: str):
 
         if data is None or data.empty:
             # 自动从本地 Excel 兜底加载，保障离线与限流时可用
-            candidates = list(Path('.').glob(f"**/{stock_code}*_data.xlsx"))
+            candidates = list(BASE_DIR.glob(f"**/{stock_code}*_data.xlsx"))
             if candidates:
                 data = pd.read_excel(candidates[0])
                 if 'Date' in data.columns:
@@ -354,87 +414,70 @@ def calculate_stock_technical_and_strategies(stock_code: str, stock_name: str):
         if data.empty:
             return None
 
-        # 计算技术指标
-        delta = data['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        data['RSI'] = 100 - (100 / (1 + rs))
-
-        exp1 = data['Close'].ewm(span=12, adjust=False).mean()
-        exp2 = data['Close'].ewm(span=26, adjust=False).mean()
-        data['MACD'] = exp1 - exp2
-        data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-
-        data['MA20'] = data['Close'].rolling(window=20).mean()
-        data['MA50'] = data['Close'].rolling(window=50).mean()
-
-        data['BB_middle'] = data['Close'].rolling(window=20).mean()
-        data['BB_std'] = data['Close'].rolling(window=20).std()
-        data['BB_upper'] = data['BB_middle'] + 2 * data['BB_std']
-        data['BB_lower'] = data['BB_middle'] - 2 * data['BB_std']
-
-        latest = data.iloc[-1]
-        current_price = latest['Close']
-        rsi = latest['RSI']
-        macd = latest['MACD']
-        signal = latest['Signal']
-        ma20 = latest['MA20']
-        ma50 = latest['MA50']
-        bb_lower = latest['BB_lower']
-        bb_upper = latest['BB_upper']
-
-        # 1. 动态技术面评分 (0-10分)
-        tech_score = 5.0
-        if rsi < 30:
-            tech_score += 2.0
-        elif rsi < 40:
-            tech_score += 1.0
-        elif rsi > 70:
-            tech_score -= 2.0
-        elif rsi > 60:
-            tech_score -= 1.0
-
-        if macd > signal:
-            tech_score += 1.0
+        # 优先使用后端共享指标与技术面评分（空头排列下禁用超卖加分）
+        if calculate_all_indicators is not None and calculate_tech_score is not None:
+            data = calculate_all_indicators(data)
+            latest = data.iloc[-1]
+            tech_score, _ = calculate_tech_score(latest)
+            current_price = float(latest['Close'])
+            rsi = float(latest['RSI']) if pd.notna(latest.get('RSI')) else 50.0
+            ma20 = float(latest['MA20']) if pd.notna(latest.get('MA20')) else current_price * 0.95
+            bb_lower = float(latest['BB_Lower']) if pd.notna(latest.get('BB_Lower')) else current_price * 0.90
         else:
-            tech_score -= 1.0
+            delta = data['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi_s = 100 - (100 / (1 + rs))
+            rsi_s = np.where((loss == 0) & (gain > 0), 100.0, np.where((loss == 0) & (gain == 0), 50.0, rsi_s))
+            data['RSI'] = pd.Series(rsi_s, index=data.index)
 
-        if current_price > ma20:
-            tech_score += 0.5
-        if current_price > ma50:
-            tech_score += 0.5
-        if ma20 > ma50:
-            tech_score += 0.5
+            exp1 = data['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = data['Close'].ewm(span=26, adjust=False).mean()
+            data['MACD'] = exp1 - exp2
+            data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
+            data['MA20'] = data['Close'].rolling(window=20).mean()
+            data['MA50'] = data['Close'].rolling(window=50).mean()
+            data['BB_Middle'] = data['Close'].rolling(window=20).mean()
+            data['BB_Std'] = data['Close'].rolling(window=20).std()
+            data['BB_Upper'] = data['BB_Middle'] + 2 * data['BB_Std']
+            data['BB_Lower'] = data['BB_Middle'] - 2 * data['BB_Std']
 
-        if current_price < bb_lower:
-            tech_score += 1.0
-        elif current_price > bb_upper:
-            tech_score -= 1.0
+            latest = data.iloc[-1]
+            current_price = float(latest['Close'])
+            rsi = float(latest['RSI']) if pd.notna(latest['RSI']) else 50.0
+            ma20 = float(latest['MA20']) if pd.notna(latest['MA20']) else current_price * 0.95
+            ma50 = float(latest['MA50']) if pd.notna(latest['MA50']) else current_price * 0.95
+            bb_lower = float(latest['BB_Lower']) if pd.notna(latest['BB_Lower']) else current_price * 0.90
+            bb_upper = float(latest['BB_Upper']) if pd.notna(latest['BB_Upper']) else current_price * 1.10
+            bearish = ma20 < ma50
 
-        tech_score = max(0.0, min(10.0, tech_score))
+            tech_score = 5.0
+            if rsi < 30 and not bearish:
+                tech_score += 2.0
+            elif rsi < 40 and not bearish:
+                tech_score += 1.0
+            elif rsi > 70:
+                tech_score -= 2.0
+            elif rsi > 60:
+                tech_score -= 1.0
+            tech_score += 1.0 if latest['MACD'] > latest['MACD_Signal'] else -1.0
+            tech_score += 0.5 if current_price > ma20 else (-0.5 if current_price < ma20 else 0)
+            tech_score += 0.5 if current_price > ma50 else (-0.5 if current_price < ma50 else 0)
+            tech_score += 0.5 if ma20 > ma50 else (-0.5 if ma20 < ma50 else 0)
+            if current_price < bb_lower and not bearish:
+                tech_score += 1.0
+            elif current_price > bb_upper:
+                tech_score -= 1.0
+            tech_score = max(0.0, min(10.0, tech_score))
 
-        # 2. 线性策略点位（斐波那契50%回调或5%回调，+15%止盈 / -8%止损）
-        if ma20 < current_price:
-            price_range = current_price - ma20
-            linear_buy = current_price - 0.5 * price_range
-        else:
-            linear_buy = current_price * 0.95
+        # 2. 线性与非线性策略点位（走 price_levels 统一纯函数）
+        linear_buy = linear_buy_point(current_price, ma20)
+        nonlinear_buy = nonlinear_buy_point(rsi, ma20, bb_lower)
+        linear_levels = levels_with_targets(current_price, linear_buy, LINEAR_PROFIT_PCT)
+        nonlinear_levels = levels_with_targets(current_price, nonlinear_buy, NONLINEAR_PROFIT_PCT)
 
-        linear_buy = min(linear_buy, current_price * 0.95)
-        linear_stop = linear_buy * 0.92
-        linear_profit = linear_buy * 1.15
-
-        # 3. 非线性策略点位（20日均线或布林带下轨支撑，+46%止盈 / -8%止损）
-        if rsi < 30:
-            nonlinear_buy = bb_lower
-        else:
-            nonlinear_buy = ma20
-
-        nonlinear_stop = nonlinear_buy * 0.92
-        nonlinear_profit = nonlinear_buy * 1.46
-
-        # 4. 核心标的财报日历与排雷雷达
+        # 3. 核心标的财报日历与排雷雷达
         earnings_info = {
             'date': None,
             'days': None,
@@ -442,17 +485,15 @@ def calculate_stock_technical_and_strategies(stock_code: str, stock_name: str):
             'is_imminent': False
         }
         try:
-            cal = stock.calendar
-            ed = None
-            if isinstance(cal, dict) and 'Earnings Date' in cal and cal['Earnings Date']:
-                ed = cal['Earnings Date'][0]
-            elif hasattr(cal, 'get'):
-                ed_list = cal.get('Earnings Date')
-                if ed_list:
-                    ed = ed_list[0]
-            if ed:
-                today = datetime.now().date()
-                ed_date = ed.date() if hasattr(ed, 'date') else ed
+            cal = stock.calendar if stock is not None else None
+            candidates = None
+            if isinstance(cal, dict):
+                candidates = cal.get('Earnings Date')
+            elif cal is not None and hasattr(cal, 'get'):
+                candidates = cal.get('Earnings Date')
+            today = datetime.now().date()
+            ed_date = pick_next_earnings_date(candidates, today)
+            if ed_date:
                 days = (ed_date - today).days
                 earnings_info['date'] = ed_date.strftime('%Y-%m-%d')
                 earnings_info['days'] = days
@@ -475,25 +516,25 @@ def calculate_stock_technical_and_strategies(stock_code: str, stock_name: str):
             'tech_score': tech_score,
             'earnings': earnings_info,
             'linear': {
-                'buy': linear_buy,
-                'stop': linear_stop,
-                'profit': linear_profit,
+                'buy': linear_levels['buy'],
+                'stop': linear_levels['stop'],
+                'profit': linear_levels['profit'],
             },
             'nonlinear': {
-                'buy': nonlinear_buy,
-                'stop': nonlinear_stop,
-                'profit': nonlinear_profit,
+                'buy': nonlinear_levels['buy'],
+                'stop': nonlinear_levels['stop'],
+                'profit': nonlinear_levels['profit'],
             },
-            'linear_distance': (current_price - linear_buy) / current_price * 100,
-            'nonlinear_distance': (current_price - nonlinear_buy) / current_price * 100
+            'linear_distance': linear_levels['distance'],
+            'nonlinear_distance': nonlinear_levels['distance'],
         }
     except Exception as e:
         print(f"[Tech] 计算 {stock_code} 失败: {e}")
         return None
 
 
-# 标的历史 2 年量化实测画像（基于步进式 Walk-Forward 无未来函数回测）
-STOCK_HISTORICAL_PROFILES = {
+# 标的历史 2 年量化实测默认画像（若 data/stock_profiles.json 存在则动态覆盖）
+DEFAULT_STOCK_HISTORICAL_PROFILES = {
     'MU': {
         'badge': '🛡️ 核心存储',
         'stat': '非线性盈亏比 4.7:1 | 均单收益 +6.5% | 累计 +95.1%',
@@ -547,15 +588,36 @@ STOCK_HISTORICAL_PROFILES = {
 }
 
 
+def load_historical_profiles() -> dict:
+    """加载历史回测画像：优先读取 verify_nonlinear_winrate.py 生成的动态 JSON，兜底默认画像"""
+    profiles = dict(DEFAULT_STOCK_HISTORICAL_PROFILES)
+    dynamic_path = BASE_DIR / "data" / "stock_profiles.json"
+    if dynamic_path.exists():
+        try:
+            with open(dynamic_path, 'r', encoding='utf-8') as f:
+                custom = json.load(f)
+            if isinstance(custom, dict):
+                for code, val in custom.items():
+                    if isinstance(val, dict):
+                        profiles[code] = {**profiles.get(code, {}), **val}
+        except Exception:
+            pass
+    return profiles
+
+
+STOCK_HISTORICAL_PROFILES = load_historical_profiles()
+
+
 def generate_ai_morning_briefing(macro_summary: str, stock_details: list, regime: dict) -> str:
-    """由 Gemini 3.7 Flash 生成 Message 1：30秒AI晨报与投研精要（结合大盘熔断风控状态）"""
+    """生成 Message 1：30秒AI晨报与投研精要（结合大盘熔断风控状态）"""
     if not (is_ai_configured and is_ai_configured() and chat_completion):
         return f"**【AI 晨报与投研精要】** {datetime.now().strftime('%m-%d %H:%M')}\n\n⚠️ 大模型尚未配置，宏观风向参考：{macro_summary}"
 
+    profiles = load_historical_profiles()
     stocks_text = "\n".join([
         f"- {s['stock_code']} {s['stock_name']}: 现价 ${s['current_price']:.2f}, RSI={s['rsi']:.1f}, "
         f"综合评分 {s['total_score']:.1f}, 距线性买点 {s['linear_distance']:.1f}%, 距非线性买点 {s['nonlinear_distance']:.1f}%, 事件: {s['event']}"
-        f" | 历史实测: {STOCK_HISTORICAL_PROFILES.get(s['stock_code'], {}).get('stat', '实测中')}"
+        f" | 历史实测: {profiles.get(s['stock_code'], {}).get('stat', '实测中')}"
         + (f" | 财报雷达: {s.get('earnings', {}).get('tag', '')}" if s.get('earnings', {}).get('tag') else "")
         for s in stock_details
     ])
@@ -616,6 +678,7 @@ def generate_ai_morning_briefing(macro_summary: str, stock_details: list, regime
 def format_strategy_matrix(results: list, is_degraded: bool, regime: dict) -> str:
     """生成 Message 2：量化双策略点位表（带大盘熔断风控指示、财报雷达与历史真实回测画像）"""
     sorted_results = sorted(results, key=lambda x: x['total_score'], reverse=True)
+    profiles = load_historical_profiles()
     report = []
     report.append(f"**【量化双策略点位表】** {datetime.now().strftime('%m-%d %H:%M')}")
     report.append(f"> 🛡️ **大盘风控状态**: {regime.get('banner', '')}")
@@ -633,8 +696,8 @@ def format_strategy_matrix(results: list, is_degraded: bool, regime: dict) -> st
         linear = res['linear']
         nonlinear = res['nonlinear']
 
-        profile = STOCK_HISTORICAL_PROFILES.get(code, {'badge': '', 'stat': ''})
-        badge_str = f" | {profile['badge']}" if profile['badge'] else ""
+        profile = profiles.get(code, {'badge': '', 'stat': ''})
+        badge_str = f" | {profile['badge']}" if profile.get('badge') else ""
 
         earnings = res.get('earnings', {})
         earnings_tag = earnings.get('tag', '')
@@ -642,7 +705,7 @@ def format_strategy_matrix(results: list, is_degraded: bool, regime: dict) -> st
         report.append(f"### {i}. {code} {name} {icon}{rec} (`{score:.1f}分`){badge_str}")
         if earnings_tag:
             report.append(f"- 📅 **财报雷达**: `{earnings_tag}`")
-        stat_line = f" | 实测: `{profile['stat']}`" if profile['stat'] else ""
+        stat_line = f" | 实测: `{profile['stat']}`" if profile.get('stat') else ""
         report.append(f"- 现价 **${price:.2f}** (技`{res['tech_score']:.1f}` 新`{res['news_score']:.1f}` 宏`{res['macro_score']:.1f}`){stat_line}")
         report.append(f"- 💡 **线性**: 买入 **${linear['buy']:.2f}** (-{res['linear_distance']:.1f}%) | 止盈 ${linear['profit']:.2f} (+15%) | 止损 ${linear['stop']:.2f} (-8%)")
         report.append(f"- 🛡️ **非线性**: 买入 **${nonlinear['buy']:.2f}** (-{res['nonlinear_distance']:.1f}%) | 止盈 ${nonlinear['profit']:.2f} (+46%) | 止损 ${nonlinear['stop']:.2f} (-8%)")
@@ -688,27 +751,17 @@ def main():
     t0 = time.time()
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        # 并发任务 1: FRED 宏观流动性
         macro_future = executor.submit(fetch_macro_data, fred_key)
-
-        # 并发任务 2: 大盘黑天鹅与波动率熔断风控 (VIX + QQQ)
         regime_future = executor.submit(fetch_market_regime_and_circuit_breaker)
-
-        # 并发任务 3: 全股票并发拉取技术指标与双策略点位
         tech_futures = {code: executor.submit(calculate_stock_technical_and_strategies, code, name) for code, name in stocks}
-
-        # 并发任务 4: 新闻并发拉取与大模型评估
         news_future = executor.submit(fetch_news_and_evaluate_sentiment, stocks, news_key)
 
-        # 收集宏观结果
         macro_score, macro_summary, macro_degraded = macro_future.result()
         print(f"  [OK] 宏观面完成: 利率基准 {macro_score}/10 | {macro_summary}", flush=True)
 
-        # 收集风控态势结果
         regime = regime_future.result()
         print(f"  [OK] 风控态势完成: {regime['banner']}", flush=True)
 
-        # 收集技术面结果（保持原股票列表顺序）
         tech_results = []
         for code, name in stocks:
             try:
@@ -720,7 +773,6 @@ def main():
             except Exception as e:
                 print(f"  [FAIL] 技术面异常 {code}: {e}", flush=True)
 
-        # 收集新闻结果
         news_results, news_degraded = news_future.result()
         print(f"  [OK] 资讯与大模型打分完成: 共 {len(news_results)} 支标的", flush=True)
 
@@ -734,7 +786,10 @@ def main():
         tech_s = item['tech_score']
         news_s = news_info['score']
         macro_s = macro_score
-        event_s = 5.0  # 基础事件驱动分
+        earnings_info = item.get('earnings', {})
+        # 若财报 7 天内临近，事件分下调提醒风险
+        days_away = earnings_info.get('days')
+        event_s = 4.5 if (days_away is not None and 0 <= days_away <= 7) else 5.0
 
         total_s = (
             tech_s * 0.40 +
@@ -768,7 +823,6 @@ def main():
             icon = "🟡"
 
         # 核心标的财报临近排雷保护
-        earnings_info = item.get('earnings', {})
         if earnings_info.get('is_imminent'):
             if "买入" in rec:
                 rec = "财报避险"
@@ -791,7 +845,7 @@ def main():
     message_2_matrix = format_strategy_matrix(full_results, is_degraded, regime)
 
     # 保存报告至本地 reports 目录
-    report_dir = Path("reports")
+    report_dir = BASE_DIR / "reports"
     report_dir.mkdir(exist_ok=True)
     today_str = datetime.now().strftime('%Y%m%d')
     briefing_file = report_dir / f"ai_briefing_{today_str}.txt"

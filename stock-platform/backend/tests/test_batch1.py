@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""第一批功能单元测试：卖出计算 / 日报快照 / 风控规则"""
+"""第一批功能单元测试：卖出计算 / 日报快照 / 风控规则 / 微信无损分包 / 2%科学建仓与半凯利计算"""
 import sys
 from pathlib import Path
 
@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.services.report_service import ReportService, _load_webhook
+from app.services.report_service import ReportService, _load_webhook, split_wechat_chunks
 
 
 # ============================================
@@ -86,6 +86,25 @@ class TestReportSnapshot:
         expected = len(result['report'].encode('utf-8'))
         assert result['char_count'] == expected
 
+    def test_split_wechat_chunks_lossless(self):
+        """超长日报按段落无损分包，不截断丢弃任何股票"""
+        cards = [
+            f"**{i}. 测试股票 S{i:02d}** <font color=\"info\">强烈买入</font> 8.5分\n"
+            f"现价$100.0 RSI50.0 MACD:🟢金叉3天\n"
+            f"线性: 买95.0(-5.0%) 盈109.25 损87.4\n"
+            f"非线性: 买97.0(-3.0%) 盈141.62 损89.24"
+            for i in range(1, 50)
+        ]
+        long_report = "\n\n".join(cards)
+        assert len(long_report.encode('utf-8')) > 3800
+        chunks = split_wechat_chunks(long_report, max_bytes=3800)
+        assert len(chunks) >= 2
+        for c in chunks:
+            assert len(c.encode('utf-8')) <= 3800
+        # 首尾股票均完整保留
+        rejoined = "\n\n".join(chunks)
+        assert "S01" in rejoined and "S49" in rejoined
+
 
 # ============================================
 # 风控规则常量与webhook加载
@@ -105,7 +124,7 @@ class TestRiskRules:
 
 
 class TestPositionPnlMath:
-    """卖出盈亏：直接测试路由使用的共享计算函数 _realized_pnl"""
+    """卖出盈亏与2%风险仓位计算器：测试路由使用的共享计算函数"""
 
     def test_profit_case(self):
         from app.routers.portfolio import _realized_pnl
@@ -121,6 +140,23 @@ class TestPositionPnlMath:
         from app.routers.portfolio import _realized_pnl
         pnl, pct = _realized_pnl(10.0, 0, 100)
         assert (pnl, pct) == (1000.0, 0)
+
+    def test_calculate_recommended_position_2pct_rule(self):
+        from app.routers.portfolio import calculate_recommended_position
+        # 10万本金，买价100，止损92（每股风险8）：2%风险(2000) -> 250股，首仓125股，占25%
+        res = calculate_recommended_position(100000.0, 100.0, 92.0, win_rate=65.0)
+        assert res['recommended_shares'] == 250
+        assert res['first_tranche_shares'] == 125
+        assert res['position_pct'] == 25.0
+        assert res['capped_by_40pct'] is False
+        assert res['half_kelly_pct'] is not None and res['half_kelly_pct'] > 0
+
+    def test_calculate_recommended_position_capped_at_40pct(self):
+        from app.routers.portfolio import calculate_recommended_position
+        # 止损99（每股风险1）：2%风险可买2000股，但被40%单票上限截断为400股
+        res = calculate_recommended_position(100000.0, 100.0, 99.0)
+        assert res['recommended_shares'] == 400
+        assert res['capped_by_40pct'] is True
 
 
 if __name__ == '__main__':

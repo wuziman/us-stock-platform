@@ -55,7 +55,10 @@ def run_backtest(request: BacktestRequest):
         end_date=request.end_date,
         initial_capital=request.initial_capital,
         period=request.period,
-        commission_per_trade=request.commission_per_trade
+        commission_per_trade=request.commission_per_trade,
+        trailing_stop=request.trailing_stop,
+        staged_entry=request.staged_entry,
+        params=request.params,
     )
 
     if 'error' in result:
@@ -75,7 +78,9 @@ def run_backtest_compare(request: BacktestCompareRequest):
         market=market,
         period=request.period,
         initial_capital=request.initial_capital,
-        commission_per_trade=request.commission_per_trade
+        commission_per_trade=request.commission_per_trade,
+        trailing_stop=request.trailing_stop,
+        staged_entry=request.staged_entry,
     )
 
     if 'error' in result:

@@ -10,6 +10,7 @@ import type {
   MarketRegimeResponse,
   OptimizeResult,
   Position,
+  PositionSizeInfo,
   PositionSummary,
   QuoteItem,
   ReportPreview,
@@ -90,6 +91,9 @@ export const backtestApi = {
     end_date?: string;
     initial_capital?: number;
     commission_per_trade?: number;
+    trailing_stop?: boolean;
+    staged_entry?: boolean;
+    params?: Record<string, number>;
   }) => api.post<BacktestResult>('/backtest', data),
 
   // 一键对比4策略 + 买入持有基准
@@ -98,6 +102,8 @@ export const backtestApi = {
     period?: string;
     initial_capital?: number;
     commission_per_trade?: number;
+    trailing_stop?: boolean;
+    staged_entry?: boolean;
   }) => api.post<CompareResult>('/backtest/compare', data),
 
   // 🎯 参数网格寻优
@@ -167,6 +173,14 @@ export const portfolioApi = {
 
   setTotalCapital: (total_capital: number) =>
     api.put<{ message: string; total_capital: number }>(`/portfolio/settings/total_capital?total_capital=${total_capital}`),
+
+  getPositionSize: (params: {
+    buy_price: number;
+    stop_loss?: number;
+    total_capital?: number;
+    risk_per_trade?: number;
+    win_rate?: number;
+  }) => api.get<PositionSizeInfo>('/portfolio/position-size', { params }),
 };
 
 // 日报API

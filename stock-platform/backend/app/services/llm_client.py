@@ -1,16 +1,18 @@
 """
-OpenAI兼容LLM客户端（OpenRouter/DeepSeek/Kimi/通义等通用）
+OpenAI兼容LLM客户端（OpenRouter/DeepSeek/Kimi/通义/Gemini等通用）
 供应商配置读原项目 config/config.json 的 ai_provider 字段：
     "ai_provider": {
         "base_url": "https://openrouter.ai/api/v1",
         "api_key": "sk-or-xxxx",
         "model": "厂商/模型ID",
+        "fallback_models": [],
         "timeout": 180
     }
-API key 只存本地该文件（已在.gitignore），不进代码、不进git。
+API key 只存本地该文件（已在.gitignore）或环境变量，不进代码、不进git。
 """
 
 import logging
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -24,20 +26,37 @@ _DEFAULTS = {
     'base_url': 'https://openrouter.ai/api/v1',
     'api_key': '',
     'model': '',
+    'fallback_models': [],
     'timeout': 180,
 }
 
 
 def load_ai_provider_config() -> Dict:
     """读取AI供应商配置，缺失字段用默认值补齐（任何异常都降级为未配置状态）
-    兼容两种位置：顶层 ai_provider 或 api_keys.ai_provider（读取走 utils/app_config 单点）"""
+    兼容两种位置：顶层 ai_provider 或 api_keys.ai_provider，并支持环境变量覆盖"""
     try:
         cfg = load_config()
         p = cfg.get('ai_provider') or (cfg.get('api_keys') or {}).get('ai_provider') or {}
+        env_key = (
+            os.environ.get('AI_API_KEY')
+            or os.environ.get('OPENROUTER_API_KEY')
+            or os.environ.get('GEMINI_API_KEY')
+        )
+        env_model = os.environ.get('AI_MODEL') or os.environ.get('GEMINI_MODEL')
+        env_base = os.environ.get('AI_BASE_URL')
+
+        api_key = env_key or p.get('api_key') or ''
+        model = env_model or p.get('model') or ('gemini-2.5-flash' if os.environ.get('GEMINI_API_KEY') and not p.get('model') else '')
+        base_url = (env_base or p.get('base_url') or _DEFAULTS['base_url']).rstrip('/')
+        fallback_models = p.get('fallback_models')
+        if not isinstance(fallback_models, list):
+            fallback_models = []
+
         return {
-            'base_url': (p.get('base_url') or _DEFAULTS['base_url']).rstrip('/'),
-            'api_key': p.get('api_key') or '',
-            'model': p.get('model') or '',
+            'base_url': base_url,
+            'api_key': api_key,
+            'model': model,
+            'fallback_models': [str(m) for m in fallback_models if m],
             'timeout': int(p.get('timeout', _DEFAULTS['timeout'])),
             'universe': p.get('universe'),   # 可选：自定义候选池 [["NVDA","Nvidia"],...]
         }
@@ -68,12 +87,21 @@ def chat_completion(messages: List[Dict], temperature: float = 0.4,
 
     target_model = model or c['model']
     models_to_try = [target_model]
-    # 多模型智能容灾梯队：当 3.7 达到每日上限时，自动向下无缝补位
-    for fb in ['gemini-2.5-flash', 'gemini-3.6-flash']:
-        if fb not in models_to_try:
-            models_to_try.append(fb)
+
+    # 容灾降级梯队：优先使用用户在 config.json 配置的 fallback_models；
+    # 若未显式配置且主模型属于 Gemini 系列，则才追加同系轻量备用模型（避免非 Gemini 渠道报 404 模型不存在）
+    configured_fallbacks = c.get('fallback_models') or []
+    if configured_fallbacks:
+        for fb in configured_fallbacks:
+            if fb not in models_to_try:
+                models_to_try.append(fb)
+    elif 'gemini' in target_model.lower():
+        for fb in ['gemini-2.5-flash', 'gemini-3.6-flash']:
+            if fb not in models_to_try:
+                models_to_try.append(fb)
 
     resp = None
+    req_timeout = min(max(int(c.get('timeout', 30)), 10), 180)
     for current_model in models_to_try:
         payload = {
             'model': current_model,
@@ -83,7 +111,7 @@ def chat_completion(messages: List[Dict], temperature: float = 0.4,
         }
         for attempt in range(2):
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                resp = requests.post(url, headers=headers, json=payload, timeout=req_timeout)
                 if resp.status_code in (429, 503) and attempt == 0:
                     time.sleep(1.0)
                     continue

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AI选股纯函数测试：prompt构建 / 响应解析 / 小红书页面解析
+AI选股纯函数测试：prompt构建 / 响应解析 / 小红书页面解析 / 路径定位与实盘战绩收益计算
 不依赖网络、数据库与LLM调用。
 运行：cd backend && python -m pytest tests/test_ai_pick.py -v
 """
@@ -25,6 +25,7 @@ from app.services.ai_pick_service import (
     SYSTEM_PROMPT,
 )
 from app.services.xhs_service import _extract_initial_state, _walk_find_notes
+from app.routers.ai_pick import _repo_root, enrich_picks_with_returns
 
 
 def _fake_brief(**overrides):
@@ -189,6 +190,26 @@ class TestBuildSummaryMessages:
 
     def test_limit_constant(self):
         assert SUMMARY_POSTS_LIMIT == 20
+
+
+class TestAiPickRouterHelpers:
+    def test_repo_root_points_to_true_repo(self):
+        root = _repo_root()
+        assert (root / "tech_stock_screener.py").exists()
+
+    def test_enrich_picks_with_returns(self):
+        raw = [
+            {'stock_code': 'NVDA', 'price_at_pick': 100.0},
+            {'stock_code': 'MU', 'price_at_pick': 80.0},
+            {'stock_code': 'AAPL', 'price_at_pick': None},
+        ]
+        enriched = enrich_picks_with_returns(raw, {'NVDA': 115.0, 'AAPL': 200.0})
+        assert enriched[0]['current_price'] == 115.0
+        assert enriched[0]['return_pct'] == 15.0
+        assert enriched[1]['current_price'] is None
+        assert enriched[1]['return_pct'] is None
+        assert enriched[2]['current_price'] == 200.0
+        assert enriched[2]['return_pct'] is None
 
 
 if __name__ == '__main__':

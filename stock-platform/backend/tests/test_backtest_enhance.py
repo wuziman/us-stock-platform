@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-回测增强功能测试：每笔手续费$1 / 买入持有基准 / 4策略一键对比
+回测增强功能测试：每笔手续费$1 / 买入持有基准 / 4策略一键对比 / 自定义寻优参数透传
 全部使用合成数据直接调用服务方法，不依赖网络。
 运行：cd backend && python -m pytest tests/test_backtest_enhance.py -v
 """
@@ -163,6 +163,18 @@ class TestCommissionMath:
         assert 'error' not in result
         assert result['commission_per_trade'] == 2.0
         assert result['total_fees'] == round(len(result['trades']) * 2.0, 2)
+
+    def test_run_backtest_accepts_custom_params(self, monkeypatch):
+        """run_backtest 支持直接传入寻优最优参数 params={'tp': 0.25, 'sl': 0.06}"""
+        svc = BacktestService()
+        df = make_compare_df()
+        monkeypatch.setattr(svc.stock_service, 'get_stock_data',
+                            lambda *a, **k: df.copy())
+        res_default = svc.run_backtest('FAKE', 'linear', market='US', period='1y')
+        res_custom = svc.run_backtest('FAKE', 'linear', market='US', period='1y',
+                                      params={'tp': 0.25, 'sl': 0.06})
+        assert 'error' not in res_custom
+        assert res_custom['final_value'] != res_default['final_value']
 
 
 # ============================================

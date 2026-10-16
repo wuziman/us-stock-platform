@@ -1,10 +1,12 @@
-"""utils/price_levels.py 纯函数单测（点位公式唯一定义处的回归锚点）"""
+"""utils/price_levels.py 纯函数单测（点位公式唯一定义处的回归锚点 + ATR动态点位与移动止盈）"""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.utils.price_levels import (
+    atr_adaptive_levels,
+    compute_trailing_stop,
     discipline_stop,
     levels_with_targets,
     linear_buy_point,
@@ -47,6 +49,43 @@ class TestLevelsWithTargets:
 
     def test_zero_current_no_crash(self):
         assert levels_with_targets(0.0, 95.0, 1.15)['distance'] == 0.0
+
+
+class TestAtrAdaptiveLevels:
+    def test_atr_stop_within_corridor(self):
+        # 买入价100，ATR=4.5 -> 2*ATR=9 -> atr_stop=91.0，在[86, 95]安全走廊内
+        lv = atr_adaptive_levels(105.0, 100.0, 1.15, atr=4.5)
+        assert lv['buy'] == 100.0
+        assert lv['stop'] == 92.0
+        assert lv['atr_stop'] == 91.0
+        assert lv['breakeven_trigger'] == 110.0
+        assert lv['breakeven_stop'] == 101.0
+
+    def test_atr_stop_clamped_on_extreme_volatility(self):
+        # 高波动标的 ATR=12 -> 2*ATR=24 -> 止损被夹在最多 -14% (86.0)
+        lv_high = atr_adaptive_levels(105.0, 100.0, 1.15, atr=12.0)
+        assert lv_high['atr_stop'] == 86.0
+        # 极低波动标的 ATR=1 -> 2*ATR=2 -> 止损被夹在至少 -5% (95.0)
+        lv_low = atr_adaptive_levels(105.0, 100.0, 1.15, atr=1.0)
+        assert lv_low['atr_stop'] == 95.0
+
+    def test_fallback_when_atr_none(self):
+        lv = atr_adaptive_levels(105.0, 100.0, 1.15, atr=None)
+        assert lv['atr_stop'] == lv['stop']
+
+
+class TestComputeTrailingStop:
+    def test_before_breakeven_keeps_initial_stop(self):
+        # 成本100，初始止损92，最高到108（未达+10%即110）-> 保持92
+        assert compute_trailing_stop(100.0, 108.0, 92.0) == 92.0
+
+    def test_at_breakeven_trigger_locks_cost_plus_one_pct(self):
+        # 最高达到110 (+10%) -> 110*0.92=101.2 > 101.0 -> 上移至101.2
+        assert compute_trailing_stop(100.0, 110.0, 92.0) == 101.2
+
+    def test_trails_higher_peaks(self):
+        # 最高涨到130 -> 130*0.92=119.6
+        assert compute_trailing_stop(100.0, 130.0, 92.0) == 119.6
 
 
 class TestMacdStateDays:

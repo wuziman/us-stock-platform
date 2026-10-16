@@ -21,8 +21,7 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install pandas numpy requests openpyxl yfinance fredapi newsapi-python beautifulsoup4 lxml
+        run: pip install -r requirements.txt
 
       - name: Update stock data (optional cache)
         run: python fetch_my_stocks.py
@@ -31,9 +30,7 @@ jobs:
       - name: Run analysis
         run: python daily_stock_report_unified.py
         env:
-          # 企业微信Webhook URL（在GitHub仓库Settings → Secrets中配置）
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
-          # API Keys（在GitHub仓库Settings → Secrets中配置）
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

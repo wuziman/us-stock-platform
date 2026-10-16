@@ -1,10 +1,12 @@
 """
 技术面评分（共享纯函数）
-analysis_service 与 report_service 共用同一套规则，避免双份实现漂移。
+analysis_service、report_service 与根目录日报脚本共用同一套规则，避免多份实现漂移。
 规则：基线5分；
 RSI<30 +2 / <40 +1（仅非空头排列时启用——空头排列下的超卖更可能是下跌中继）/ >70 -2 / >60 -1；
 MACD金叉+1/死叉-1；站上MA20/MA50各+0.5、跌破各-0.5、贴线0；多头排列+0.5/空头排列-0.5/粘合0；
-破布林下轨+1（仅非空头排列时启用）/破上轨-1；结果夹在0-10。
+破布林下轨+1（仅非空头排列时启用）/破上轨-1；
+量价配合（当传入 Volume_Ratio 时启用）：多头温和放量(+0.5) / 缩量回踩支撑(+0.5) / 破位放量杀跌(-0.5)；
+结果夹在0-10。
 """
 from typing import Dict, Tuple
 
@@ -75,6 +77,21 @@ def calculate_tech_score(latest: pd.Series) -> Tuple[float, Dict]:
                 score += 1.0
         elif current_price > bb_upper:
             score -= 1.0
+
+    # 量价配合因子（可选字段：当数据包含 Volume_Ratio 时自动参与微调）
+    vol_ratio = latest.get('Volume_Ratio', float('nan'))
+    if pd.notna(vol_ratio) and vol_ratio > 0:
+        details['volume_ratio'] = round(float(vol_ratio), 2)
+        if pd.notna(ma20) and ma20 > 0:
+            if current_price > ma20 and 1.2 <= vol_ratio <= 2.8:
+                # 站上均线且温和放量上攻
+                score += 0.5
+            elif 0.98 * ma20 <= current_price <= 1.03 * ma20 and vol_ratio < 0.85 and not bearish_alignment:
+                # 多头趋势下缩量回踩20日均线支撑
+                score += 0.5
+            elif current_price < ma20 and vol_ratio >= 1.6:
+                # 跌破均线且放量杀跌
+                score -= 0.5
 
     details['current_price'] = round(current_price, 2)
     score = max(0, min(10, score))

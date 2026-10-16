@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-技术信号测试：K线形态识别 / 支撑阻力位 / MACD背离
+技术信号测试：K线形态识别（含放量确认） / 支撑阻力位 / MACD与RSI背离共振
 运行：cd backend && python -m pytest tests/ -v
 """
 import sys
@@ -15,6 +15,7 @@ from app.services.pattern_service import (
     detect_candlestick_patterns,
     detect_support_resistance,
     detect_macd_divergence,
+    detect_rsi_divergence,
 )
 
 
@@ -54,6 +55,16 @@ class TestCandlestickPatterns:
         df = make_df(rows)
         found = patterns_on(df)
         assert '锤子线' in found
+
+    def test_volume_surge_appends_ratio_tag(self):
+        """当成交量达到前5日均量1.5倍以上时，方向性形态自动附带放量倍数标记"""
+        rows = [bar(110, 108), bar(108, 106), bar(106, 104),
+                bar(104, 102), bar(102, 100),
+                bar(99.5, 100.2, h=100.3, l=95.0)]
+        df = make_df(rows)
+        df.iloc[-1, df.columns.get_loc('Volume')] = 2200  # 2.2倍放量
+        found = patterns_on(df)
+        assert '锤子线(放量2.2x)' in found
 
     def test_bullish_engulfing(self):
         """前阴后阳且实体包住 → 看涨吞没"""
@@ -228,11 +239,15 @@ class TestMacdDivergence:
         return make_df(rows)
 
     def test_top_divergence(self):
-        """价格新高但MACD走低 → top_divergence=True"""
-        div = detect_macd_divergence(self._top_divergence_df())
+        """价格新高但MACD走低 → top_divergence=True，且包含RSI背离共振"""
+        df = self._top_divergence_df()
+        div = detect_macd_divergence(df)
+        rsi_div = detect_rsi_divergence(df)
         assert div['top_divergence'] is True
         assert div['bottom_divergence'] is False
         assert '顶背离' in div['detail'] or '新高' in div['detail']
+        assert rsi_div['rsi_top_divergence'] is True
+        assert 'MACD+RSI双背离共振' in div['detail']
 
     def test_no_divergence_on_steady_trend(self):
         """单边稳定上涨（无新高+动能走低的组合）→ 不报顶背离"""

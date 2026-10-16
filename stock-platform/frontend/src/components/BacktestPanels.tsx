@@ -3,7 +3,7 @@
 // 消除此前"寻优/WF 静默继承顶部表单"的隐式耦合（参数经 getParams 显式传入并回显）。
 import React, { useState } from 'react';
 import { Card, Select, Button, InputNumber, Table, Tag, Space, Descriptions, message } from 'antd';
-import { AimOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import { AimOutlined, PlayCircleOutlined, RocketOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
 import { backtestApi } from '../services/api';
@@ -133,10 +133,12 @@ interface RunPanelProps {
   strategies: Strategy[];
   /** 点击运行时从主表单取周期/资金（显式传参，面板标题回显实际口径） */
   getParams: () => { period?: string; initial_capital: number };
+  /** 一键将寻优得到的最优参数带入主回测引擎执行 */
+  onApplyBestParams?: (strategy: string, bestParams: Record<string, number>) => void;
 }
 
 // 🎯 参数网格寻优面板
-export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, getParams }) => {
+export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, getParams, onApplyBestParams }) => {
   const [optStrategy, setOptStrategy] = useState('linear');
   const [optResult, setOptResult] = useState<OptimizeResult | null>(null);
   const [optLoading, setOptLoading] = useState(false);
@@ -256,10 +258,24 @@ export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, 
 
       {optResult && (
         <>
-          <Tag color="gold" style={{ marginBottom: 12 }}>
-            最优参数：{fmtParams(optResult.best.params)}
-            （{METRIC_LABEL[optResult.metric] || optResult.metric} {Number(optResult.best.sharpe_ratio).toFixed(2)}）
-          </Tag>
+          <div style={{ marginBottom: 12 }}>
+            <Space wrap>
+              <Tag color="gold">
+                最优参数：{fmtParams(optResult.best.params)}
+                （{METRIC_LABEL[optResult.metric] || optResult.metric} {Number(optResult.best.sharpe_ratio).toFixed(2)}）
+              </Tag>
+              {onApplyBestParams && (
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<RocketOutlined />}
+                  onClick={() => onApplyBestParams(optResult.strategy, optResult.best.params)}
+                >
+                  以此最优参数运行回测
+                </Button>
+              )}
+            </Space>
+          </div>
           <ReactEChartsCore echarts={echarts} option={getHeatmapOption()} style={{ height: 320 }} />
           <div style={{ margin: '8px 0 4px', color: colors.textSecondary }}>
             热力图：x={optResult.heatmap.x_name}，y={optResult.heatmap.y_name}，颜色={METRIC_LABEL[optResult.metric] || optResult.metric}；下表为Top5最优参数组合
@@ -282,6 +298,7 @@ export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, 
 // 🔬 Walk-Forward 滚动验证面板
 export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategies, getParams }) => {
   const [wfStrategy, setWfStrategy] = useState('linear');
+  const [wfPeriod, setWfPeriod] = useState('5y');
   const [wfSegments, setWfSegments] = useState(2);
   const [wfResult, setWfResult] = useState<WFResult | null>(null);
   const [wfLoading, setWfLoading] = useState(false);
@@ -297,7 +314,7 @@ export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategie
       const response = await backtestApi.walkForward({
         stock_code: stockCode,
         strategy: wfStrategy,
-        period: '5y',
+        period: wfPeriod,
         initial_capital: params.initial_capital,
         segments: wfSegments
       });
@@ -396,13 +413,23 @@ export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategie
   return (
     <Card title={`🔬 Walk-Forward验证${wfResult ? ` · ${wfResult.stock_code} · ${periodLabel(wfResult.period)} · 资金$${(wfResult.initial_capital ?? 0).toLocaleString()}` : ''}`} style={{ marginTop: 16 }}>
       <Space wrap style={{ marginBottom: 16 }}>
-        <Select value={wfStrategy} onChange={setWfStrategy} style={{ width: 240 }} optionLabelProp="title">
+        <Select value={wfStrategy} onChange={setWfStrategy} style={{ width: 200 }} optionLabelProp="title">
           {strategies.map(s => (
             <Select.Option key={s.id} value={s.id} title={s.name}>
               {s.name} - {s.description}
             </Select.Option>
           ))}
         </Select>
+        <Select
+          value={wfPeriod}
+          onChange={setWfPeriod}
+          style={{ width: 96 }}
+          options={[
+            { value: '1y', label: '近1年' },
+            { value: '3y', label: '近3年' },
+            { value: '5y', label: '近5年' },
+          ]}
+        />
         <span>段数：</span>
         <InputNumber
           min={1}
