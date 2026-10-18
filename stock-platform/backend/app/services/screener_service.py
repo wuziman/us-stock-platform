@@ -7,6 +7,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import os
 from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -568,7 +569,12 @@ def generate_ai_thesis(top5: list) -> str:
         return "AI研报生成中遇到临时延迟，各标的量化点位已就绪。"
 
 
-def run_screener(db: Optional[Session] = None, universe: Optional[List[Dict]] = None, ticker_cls=None) -> Dict:
+def run_screener(
+    db: Optional[Session] = None,
+    universe: Optional[List[Dict]] = None,
+    ticker_cls=None,
+    sync_json: Optional[bool] = None,
+) -> Dict:
     """执行硬科技全池扫描并将最新 TOP 5 结果持久化入库（同时同步更新 data/weekly_alpha_top5.json 备份）"""
     pool = universe or HARD_TECH_UNIVERSE
     results = []
@@ -599,14 +605,16 @@ def run_screener(db: Optional[Session] = None, universe: Optional[List[Dict]] = 
     }
     save_weekly_snapshot_to_db(payload, db=db)
 
-    # 同步写一份本地 JSON 备份
-    try:
-        data_dir = _REPO_ROOT / "data"
-        data_dir.mkdir(exist_ok=True)
-        (data_dir / "weekly_alpha_top5.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except Exception:
-        pass
+    # 同步写一份本地 JSON 备份（仅生产实盘写入，测试隔离环境下不污染 data/weekly_alpha_top5.json）
+    should_sync = sync_json if sync_json is not None else ("STOCK_PLATFORM_DB" not in os.environ)
+    if should_sync:
+        try:
+            data_dir = _REPO_ROOT / "data"
+            data_dir.mkdir(exist_ok=True)
+            (data_dir / "weekly_alpha_top5.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
 
     return payload
