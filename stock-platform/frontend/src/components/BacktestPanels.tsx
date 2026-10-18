@@ -2,7 +2,7 @@
 // 自包含设计——各自持有结果状态与请求逻辑，只依赖父组件传入的股票代码与主表单参数，
 // 消除此前"寻优/WF 静默继承顶部表单"的隐式耦合（参数经 getParams 显式传入并回显）。
 import React, { useState } from 'react';
-import { Card, Select, Button, InputNumber, Table, Tag, Space, Descriptions, message } from 'antd';
+import { Card, Select, Button, InputNumber, Table, Tag, Space, Descriptions, Alert, message } from 'antd';
 import { AimOutlined, PlayCircleOutlined, RocketOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
@@ -132,7 +132,7 @@ interface RunPanelProps {
   stockCode: string | null;
   strategies: Strategy[];
   /** 点击运行时从主表单取周期/资金（显式传参，面板标题回显实际口径） */
-  getParams: () => { period?: string; initial_capital: number };
+  getParams: () => { period?: string; initial_capital: number; commission_per_trade?: number };
   /** 一键将寻优得到的最优参数带入主回测引擎执行 */
   onApplyBestParams?: (strategy: string, bestParams: Record<string, number>) => void;
 }
@@ -155,7 +155,8 @@ export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, 
         stock_code: stockCode,
         strategy: optStrategy,
         period: params.period || '1y',
-        initial_capital: params.initial_capital
+        initial_capital: params.initial_capital,
+        commission_per_trade: params.commission_per_trade ?? 1.0,
       });
       setOptResult(response.data);
       message.success('寻优完成');
@@ -258,11 +259,17 @@ export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, 
 
       {optResult && (
         <>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={optResult.in_sample_warning || '样本内寻优，请用 Walk-Forward 验证'}
+          />
           <div style={{ marginBottom: 12 }}>
             <Space wrap>
               <Tag color="gold">
                 最优参数：{fmtParams(optResult.best.params)}
-                （{METRIC_LABEL[optResult.metric] || optResult.metric} {Number(optResult.best.sharpe_ratio).toFixed(2)}）
+                （{METRIC_LABEL[optResult.metric] || optResult.metric} {Number((optResult.best as unknown as Record<string, number>)[optResult.metric] ?? optResult.best.sharpe_ratio).toFixed(2)}）
               </Tag>
               {onApplyBestParams && (
                 <Button
@@ -316,6 +323,7 @@ export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategie
         strategy: wfStrategy,
         period: wfPeriod,
         initial_capital: params.initial_capital,
+        commission_per_trade: params.commission_per_trade ?? 1.0,
         segments: wfSegments
       });
       setWfResult(response.data);
@@ -463,6 +471,23 @@ export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategie
             <Descriptions.Item label="跑赢段数">
               {wfResult.summary.win_segments}/{wfResult.summary.total_segments}
             </Descriptions.Item>
+            {(wfResult.param_stability || wfResult.summary.param_stability) && (() => {
+              const ps = wfResult.param_stability || wfResult.summary.param_stability!;
+              const ratingColor = ps.stability_rating === '高' ? 'green' : ps.stability_rating === '中' ? 'gold' : 'red';
+              return (
+                <>
+                  <Descriptions.Item label="参数众数占比">
+                    <code>{fmtParams(ps.mode_params)}</code>（{(ps.mode_ratio * 100).toFixed(0)}%，{ps.mode_count}/{ps.total_segments}段）
+                  </Descriptions.Item>
+                  <Descriptions.Item label="唯一参数组合数">
+                    {ps.unique_combos} 组
+                  </Descriptions.Item>
+                  <Descriptions.Item label="参数稳定度评级">
+                    <Tag color={ratingColor}>{ps.stability_rating}</Tag>
+                  </Descriptions.Item>
+                </>
+              );
+            })()}
           </Descriptions>
           <ReactEChartsCore echarts={echarts} option={getWalkForwardChartOption()} style={{ height: 320 }} />
           <Table

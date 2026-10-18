@@ -96,3 +96,15 @@ export const downloadCsv = (
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 };
+
+/**
+ * 持仓列表视图三态判定（loading / error / empty / ready）：
+ * 当 positions 接口请求失败 (hasError=true) 时，严格返回 'error' 渲染错误横幅，
+ * 绝不落入 'empty' 渲染成“暂无持仓”。
+ */
+export const resolvePositionsViewState = (loading: boolean, hasError: boolean, count: number) => {
+  if (loading) return 'loading';
+  if (hasError) return 'error';
+  if (count <= 0) return 'empty';
+  return 'ready';
+};

@@ -25,3 +25,28 @@ export const METRIC_LABEL: Record<string, string> = {
   win_rate: '胜率%',
   trade_count: '交易次数',
 };
+
+/**
+ * 格式化回测权益曲线 Tooltip 单行（兼容折线标量 value 与 B/S 散点 [date, equity] 数组 value，彻底消除 $NaN）
+ */
+export const formatBacktestTooltipLine = (p: any) => {
+  const marker = p?.marker || '';
+  const seriesName = p?.seriesName || '';
+  const rawVal = Array.isArray(p?.value) ? p.value[1] : p?.value;
+  const numVal = Number(rawVal);
+  const eqStr = Number.isFinite(numVal) ? `$${numVal.toLocaleString()}` : '--';
+  const dataObj = p?.data || {};
+  if (dataObj && typeof dataObj === 'object' && dataObj.price != null) {
+    const pxStr = `$${Number(dataObj.price).toFixed(2)}`;
+    if (dataObj.shares != null) {
+      return `${marker}${seriesName}: 成交价 ${pxStr} (${dataObj.shares}股) · 总资产 ${eqStr}`;
+    }
+    if (dataObj.profit_pct != null) {
+      const pct = Number(dataObj.profit_pct) * 100;
+      const sign = pct >= 0 ? '+' : '';
+      return `${marker}${seriesName}: 成交价 ${pxStr} (${sign}${pct.toFixed(2)}%) · 总资产 ${eqStr}`;
+    }
+    return `${marker}${seriesName}: 成交价 ${pxStr} · 总资产 ${eqStr}`;
+  }
+  return `${marker}${seriesName}: ${eqStr}`;
+};

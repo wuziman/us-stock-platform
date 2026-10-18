@@ -312,3 +312,137 @@ class TestScheduledJobGuard:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+# ============================================
+# [第三批·第三段-5] AnalysisHistory 90天保留期自动淘汰
+# ============================================
+class TestAnalysisHistoryRetention:
+    def test_cleanup_expired_analysis_history_90_days(self):
+        """
+        [第三批·第三段-5 验证]
+        cleanup_expired_analysis_history(max_age_days=90) 仅清理超过 90 天的陈旧 AnalysisHistory 记录，
+        保留 90 天内的新近记录。
+        """
+        from app.models import AnalysisHistory
+        from app.routers.analysis import cleanup_expired_analysis_history
+        from app.utils.timezone import now_beijing
+
+        db = SessionLocal()
+        try:
+            now = now_beijing()
+            old_row = AnalysisHistory(
+                stock_code="RET_OLD_95D",
+                stock_name="Old Analysis",
+                total_score=6.0,
+                recommendation="观望",
+                created_at=now - timedelta(days=95),
+            )
+            fresh_row = AnalysisHistory(
+                stock_code="RET_FRESH_10D",
+                stock_name="Fresh Analysis",
+                total_score=8.0,
+                recommendation="推荐",
+                created_at=now - timedelta(days=10),
+            )
+            db.add(old_row)
+            db.add(fresh_row)
+            db.commit()
+
+            removed = cleanup_expired_analysis_history(max_age_days=90, db=db)
+            assert removed >= 1
+
+            assert db.query(AnalysisHistory).filter(
+                AnalysisHistory.stock_code == "RET_OLD_95D"
+            ).first() is None
+            assert db.query(AnalysisHistory).filter(
+                AnalysisHistory.stock_code == "RET_FRESH_10D"
+            ).first() is not None
+        finally:
+            for code in ("RET_OLD_95D", "RET_FRESH_10D"):
+                db.query(AnalysisHistory).filter(AnalysisHistory.stock_code == code).delete()
+            db.commit()
+            db.close()
+
+
+# ============================================
+# [第四批·第二段-4/5/6] 本地库每日备份与30天清理 + requirements.lock + API 暴露面加固
+# ============================================
+class TestBatch4Segment2Ops:
+    def test_backup_database_naming_and_30_day_cleanup(self):
+        """
+        [第四批·第二段-4 验证]
+        1. 执行 backup_database 生成 backups/stock_platform_YYYYMMDD.db，文件内容与原库一致
+        2. 注入模拟时间 2026-10-17：超过 30 天的旧备份（20260910、20260916）被自动删除，
+           30 天以内的备份（20260917、20261010、20261017）完整保留
+        """
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            fake_db = tmp_path / "stock_platform.db"
+            fake_db.write_bytes(b"SQLITE_REAL_PAYLOAD_20261017")
+            b_dir = tmp_path / "backups"
+            b_dir.mkdir(parents=True, exist_ok=True)
+
+            # 预置不同日期的历史备份文件
+            old_37d = b_dir / "stock_platform_20260910.db"  # 距 10-17 37天 (>30，应删)
+            old_31d = b_dir / "stock_platform_20260916.db"  # 距 10-17 31天 (>30，应删)
+            edge_30d = b_dir / "stock_platform_20260917.db" # 距 10-17 30天 (==30，保留)
+            recent_7d = b_dir / "stock_platform_20261010.db" # 距 10-17 7天 (<30，保留)
+            for f in (old_37d, old_31d, edge_30d, recent_7d):
+                f.write_bytes(b"OLD_BACKUP")
+
+            res = scheduler_service.backup_database(
+                db_path=fake_db,
+                backup_dir=b_dir,
+                retention_days=30,
+                now_dt=datetime(2026, 10, 17, 17, 30, 0),
+            )
+            assert res["created"] is True
+            assert res["backup_name"] == "stock_platform_20261017.db"
+            today_backup = b_dir / "stock_platform_20261017.db"
+            assert today_backup.exists()
+            assert today_backup.read_bytes() == b"SQLITE_REAL_PAYLOAD_20261017"
+
+            # 验证超过 30 天的备份已被删除，30 天内的保留
+            assert not old_37d.exists(), "37天前的备份应被自动删除"
+            assert not old_31d.exists(), "31天前的备份应被自动删除"
+            assert edge_30d.exists(), "刚好30天的备份应予保留"
+            assert recent_7d.exists(), "7天前的备份应予保留"
+            assert set(res["deleted_files"]) == {
+                "stock_platform_20260910.db",
+                "stock_platform_20260916.db",
+            }
+
+    def test_requirements_lock_and_docker_compose_loopback_hardening(self):
+        """
+        [第四批·第二段-5/6 验证]
+        1. requirements.lock 存在且全部采用 == 精确版本锁定，Dockerfile 从 requirements.lock 安装
+        2. docker-compose.yml 中 8000 与 3000 端口严格绑定 127.0.0.1，禁止裸绑 0.0.0.0
+        """
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[3]
+        req_lock = repo_root / "stock-platform" / "backend" / "requirements.lock"
+        dockerfile = repo_root / "stock-platform" / "backend" / "Dockerfile"
+        compose = repo_root / "stock-platform" / "docker-compose.yml"
+
+        assert req_lock.exists(), "requirements.lock 必须存在"
+        lock_lines = [
+            ln.strip()
+            for ln in req_lock.read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        assert len(lock_lines) >= 20
+        assert all("==" in ln for ln in lock_lines), "requirements.lock 所有依赖必须精确锁定 =="
+
+        df_txt = dockerfile.read_text(encoding="utf-8")
+        assert "requirements.lock" in df_txt and "pip install --no-cache-dir -r requirements.lock" in df_txt
+
+        comp_txt = compose.read_text(encoding="utf-8")
+        assert '"127.0.0.1:8000:8000"' in comp_txt
+        assert '"127.0.0.1:3000:80"' in comp_txt
+        assert '- "8000:8000"' not in comp_txt
+        assert '- "3000:80"' not in comp_txt

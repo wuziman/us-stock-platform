@@ -204,3 +204,107 @@ class TestModelRegistration:
         cols = ScoreHistory.__table__.columns.keys()
         for c in ("stock_code", "total_score", "price_at_score", "created_at"):
             assert c in cols
+
+
+class TestFourDimWeightHealthReport:
+    def test_weight_health_report_identifies_naked_dimension_and_perturbation(self):
+        """
+        [第三批·第二段-4 验证]
+        1. 3个月（90天）滚动窗口输出四维（technical/news/macro/event）与前向收益的 Pearson 相关性
+        2. 权重 ±10% 扰动实验强制对剩余三维按原比例缩放归一化（四维权重和恒等于 1.0）
+        3. 准确识别出过去 3 个月“在裸泳”的维度（相关性最低/负相关的 macro 维度），且不修改默认权重
+        """
+        from app.services.score_tracking_service import (
+            DEFAULT_4D_WEIGHTS,
+            _normalize_perturbed_weights,
+            build_weight_health_report,
+        )
+
+        # 1. 验证 ±10% 扰动后四维权重和严格等于 1.0
+        for dim in ("technical", "news", "macro", "event"):
+            for delta in (+0.10, -0.10):
+                w = _normalize_perturbed_weights(DEFAULT_4D_WEIGHTS, dim, delta)
+                assert abs(sum(w.values()) - 1.0) < 1e-6, f"{dim} {delta} 归一化后总和不为 1: {w}"
+                assert abs(w[dim] - (DEFAULT_4D_WEIGHTS[dim] + delta)) < 1e-6
+
+        # 2. 构造 12 条 90 天内的真实评分记录：
+        #    technical 与前向收益强正相关，event/news 正相关，macro 与前向收益负相关（在裸泳）
+        dates = [f"2026-09-{d:02d}" for d in range(1, 13)]
+        closes_map = {d: 100.0 for d in dates}
+        records = []
+        # 模拟不同个股的当前价带来不同的前向收益
+        kline_by_code = {}
+        for i, d in enumerate(dates):
+            code = f"STK{i:02d}"
+            fwd_factor = 1.0 + (i - 5) * 0.02  # 收益从 -10% 到 +12% 单调递增
+            df = pd.DataFrame(
+                {"Close": [100.0, round(100.0 * fwd_factor, 2)]},
+                index=pd.to_datetime([d, "2026-10-16"]),
+            )
+            kline_by_code[code] = df
+            records.append(
+                {
+                    "stock_code": code,
+                    "created_at": datetime.strptime(d, "%Y-%m-%d"),
+                    "technical_score": round(3.0 + i * 0.5, 2),   # 正相关
+                    "news_score": round(4.0 + i * 0.3, 2),        # 正相关
+                    "event_score": round(4.5 + i * 0.25, 2),      # 正相关
+                    "macro_score": round(9.0 - i * 0.5, 2),       # 负相关（裸泳维度）
+                    "total_score": round(5.0 + i * 0.2, 2),
+                }
+            )
+
+        report = build_weight_health_report(
+            records,
+            closes_by_code=kline_by_code,
+            window_days=90,
+            now_dt=datetime(2026, 10, 17, 12, 0, 0),
+        )
+        assert report["sample_count"] == 12
+        assert report["dimensions"]["technical"]["correlation"] > 0.9
+        assert report["dimensions"]["macro"]["correlation"] < -0.9
+        # 必须准确指出过去 3 个月在裸泳的维度是 macro
+        assert report["naked_swimmer"]["dimension"] == "macro"
+        assert "宏观面" in report["naked_swimmer"]["conclusion"]
+        # 权重 ±10% 扰动矩阵齐全，且默认权重未发生任何篡改
+        assert set(report["perturbation_matrix"].keys()) == {"technical", "news", "macro", "event"}
+        assert DEFAULT_4D_WEIGHTS == {"technical": 0.40, "news": 0.30, "macro": 0.15, "event": 0.15}
+
+    def test_cross_module_weight_single_source_of_truth(self):
+        """
+        [跨模块权重唯一真源单测]
+        1. 断言 score_tracking_service 中的 DEFAULT_4D_WEIGHTS / DEFAULT_DIMENSION_WEIGHTS
+           直接引用自 analysis_service（同一内存对象 `is` 且值恒等），且 score_tracking_service.py 源码中无手写权重字典字面量
+        2. 断言 AnalysisService.analyze_stock 实际合成总分严格等于 DEFAULT_DIMENSION_WEIGHTS 加权和
+        """
+        import inspect
+        from app.services import analysis_service as an_mod
+        from app.services import score_tracking_service as st_mod
+
+        # 1. 同一引用对象与数值恒等断言
+        assert st_mod.DEFAULT_4D_WEIGHTS is an_mod.DEFAULT_4D_WEIGHTS
+        assert st_mod.DEFAULT_DIMENSION_WEIGHTS is an_mod.DEFAULT_DIMENSION_WEIGHTS
+        assert st_mod.DEFAULT_DIMENSION_WEIGHTS["simple"] is an_mod.DEFAULT_4D_WEIGHTS
+        assert an_mod.DEFAULT_4D_WEIGHTS == {
+            "technical": 0.40,
+            "news": 0.30,
+            "macro": 0.15,
+            "event": 0.15,
+        }
+        assert an_mod.DEFAULT_DIMENSION_WEIGHTS["research"] == {
+            "technical": 0.35,
+            "news": 0.15,
+            "macro": 0.25,
+            "event": 0.25,
+        }
+
+        # 2. 源码级静态守卫：score_tracking_service.py 中不得再出现手写权重字面量定义
+        st_source = inspect.getsource(st_mod)
+        assert "from .analysis_service import DEFAULT_4D_WEIGHTS, DEFAULT_DIMENSION_WEIGHTS" in st_source
+        assert '"technical": 0.4' not in st_source and "'technical': 0.4" not in st_source
+
+        # 3. 验证 build_weight_health_report 在 simple 与 research 模式下使用的 base_weights 恒等于引擎权重
+        rep_simple = st_mod.build_weight_health_report([], {}, mode="simple")
+        rep_research = st_mod.build_weight_health_report([], {}, mode="research")
+        assert rep_simple["base_weights"] == an_mod.DEFAULT_DIMENSION_WEIGHTS["simple"]
+        assert rep_research["base_weights"] == an_mod.DEFAULT_DIMENSION_WEIGHTS["research"]

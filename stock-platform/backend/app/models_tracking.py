@@ -3,9 +3,9 @@
 """
 
 from sqlalchemy import Column, Integer, String, Float, DateTime
-from sqlalchemy.sql import func
 
 from .database import Base
+from .utils.timezone import now_beijing
 
 
 class ScoreHistory(Base):
@@ -23,4 +23,4 @@ class ScoreHistory(Base):
     total_score = Column(Float)
     recommendation = Column(String(20))
     price_at_score = Column(Float)  # 打分时的股价（计算后续收益的基准之一）
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    created_at = Column(DateTime, default=now_beijing, index=True)

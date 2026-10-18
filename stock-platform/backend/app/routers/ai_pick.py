@@ -209,68 +209,61 @@ def refresh_xhs_summaries():
 # 周度美股硬科技选股 · Alpha TOP 5 猛禽池 API
 # ----------------------------------------------------
 @router.get("/top5")
-def get_weekly_top5():
-    """获取最新周度 Alpha TOP 5 猛禽池数据"""
-    import json
-    data_file = _resolve_data_file("weekly_alpha_top5.json")
-    if data_file.exists():
-        try:
-            with open(data_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"读取选股数据失败: {e}")
-    return {
-        'scan_date': None,
-        'total_scanned': 0,
-        'top5': [],
-        'ai_thesis': '暂无周度选股数据，请点击上方按钮运行扫描'
-    }
+def get_weekly_top5(db: Session = Depends(get_db)):
+    """从平台数据库 WeeklyTop5Snapshot 读取最新周度 Alpha TOP 5 猛禽池数据（无根脚本依赖）"""
+    from ..services import screener_service
+    try:
+        return screener_service.get_latest_top5_from_db(db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取选股数据失败: {e}")
 
 
 @router.post("/top5/scan")
-def trigger_weekly_scan():
-    """手动触发一次硬科技全池选股扫描"""
-    import sys
-    root_dir = _repo_root()
-    if str(root_dir) not in sys.path:
-        sys.path.insert(0, str(root_dir))
+def trigger_weekly_scan(db: Session = Depends(get_db)):
+    """触发平台内置 screener_service 执行全池扫描并持久化入库"""
+    from ..services import screener_service
     try:
-        from tech_stock_screener import run_screener
-        return run_screener()
+        return screener_service.run_screener(db=db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"选股扫描失败: {e}")
 
 
 @router.get("/top5/history")
-def get_weekly_history():
-    """获取猛禽池累积历史战报"""
-    import json
-    history_file = _resolve_data_file("weekly_alpha_history.json")
-    if history_file.exists():
+def get_weekly_history(db: Session = Depends(get_db)):
+    """从平台数据库 WeeklyTop5Snapshot 获取猛禽池累积历史战报"""
+    from ..services import screener_service
+    try:
+        return screener_service.get_top5_history_from_db(db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取历史战报失败: {e}")
+
+
+@router.get("/performance")
+def get_ai_pick_performance(limit: int = 100, db: Session = Depends(get_db)):
+    """AI选股历史战绩复盘：入选后 20/60 交易日真实收益与按置信度（high/medium/low）分层胜率"""
+    from ..services.ai_pick_service import compute_ai_picks_performance
+    rows = (
+        db.query(AIPick)
+        .order_by(AIPick.created_at.desc(), AIPick.rank.asc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return compute_ai_picks_performance([], {})
+
+    unique_codes = sorted({r.stock_code for r in rows if r.stock_code})
+    kline_map = {}
+
+    def _fetch_kline(code: str):
         try:
-            with open(history_file, 'r', encoding='utf-8') as f:
-                weeks = json.load(f)
-            # 计算累积统计
-            total_weeks = sum(1 for w in weeks if w.get('battle_report'))
-            all_picks = []
-            for w in weeks:
-                br = w.get('battle_report')
-                if br and br.get('picks'):
-                    all_picks.extend(br['picks'])
-            total_picks = len(all_picks)
-            total_winners = sum(1 for p in all_picks if p.get('is_winner'))
-            overall_win_rate = round(total_winners / total_picks * 100, 1) if total_picks else 0
-            avg_return = round(sum(p['weekly_return_pct'] for p in all_picks) / total_picks, 2) if total_picks else 0
-            return {
-                'weeks': weeks,
-                'cumulative': {
-                    'total_weeks': total_weeks,
-                    'total_picks': total_picks,
-                    'overall_win_rate': overall_win_rate,
-                    'avg_return_pct': avg_return,
-                    'total_winners': total_winners,
-                }
-            }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"读取历史战报失败: {e}")
-    return {'weeks': [], 'cumulative': None}
+            df = stock_service.get_stock_data(code, detect_market(code), period="1y")
+            return code, df
+        except Exception:
+            return code, None
+
+    with ThreadPoolExecutor(max_workers=min(8, max(len(unique_codes), 1))) as executor:
+        for code, df in executor.map(_fetch_kline, unique_codes):
+            if df is not None and not df.empty:
+                kline_map[code] = df
+
+    return compute_ai_picks_performance(rows, kline_map)

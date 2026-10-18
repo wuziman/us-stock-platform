@@ -9,7 +9,7 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { aiPickApi, stockApi, errDetail } from '../services/api';
-import type { PickRecord, StatusInfo, XhsSummaryRow, WeeklyAlphaResponse, WeeklyHistoryResponse } from '../types/api';
+import type { PickRecord, StatusInfo, XhsSummaryRow, WeeklyAlphaResponse, WeeklyHistoryResponse, AIPickPerformanceResponse } from '../types/api';
 import { colors } from '../theme/tokens';
 
 const { TextArea } = Input;
@@ -33,6 +33,7 @@ const AIPick: React.FC = () => {
 
   const [status, setStatus] = useState<StatusInfo | null>(null);
   const [history, setHistory] = useState<PickRecord[]>([]);
+  const [performance, setPerformance] = useState<AIPickPerformanceResponse | null>(null);
   const [running, setRunning] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
 
@@ -100,8 +101,12 @@ const AIPick: React.FC = () => {
   const fetchHistory = async () => {
     setLoadingHistory(true);
     try {
-      const res = await aiPickApi.getHistory(30);
-      setHistory(res.data);
+      const [res, perfRes] = await Promise.allSettled([
+        aiPickApi.getHistory(30),
+        aiPickApi.getPerformance(100),
+      ]);
+      if (res.status === 'fulfilled') setHistory(res.value.data);
+      if (perfRes.status === 'fulfilled') setPerformance(perfRes.value.data);
     } catch {
       message.error('历史记录加载失败');
     } finally {
@@ -447,6 +452,14 @@ const AIPick: React.FC = () => {
         />
       )}
 
+      {status && !status.xhs_cookie_set && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="小红书源未配置，仅基于行情与新闻选股"
+        />
+      )}
       <Card style={{ marginBottom: 16 }}>
         <Space size="large" wrap align="center">
           <Button
@@ -468,7 +481,7 @@ const AIPick: React.FC = () => {
             <Descriptions.Item label="小红书">
               <Space>
                 <Tag color={status?.xhs_cookie_set ? 'green' : 'default'} style={status?.xhs_cookie_set ? TAG_TEXT_FIX.green : undefined}>
-                  {status?.xhs_cookie_set ? 'Cookie已配' : '无Cookie'}
+                  {status?.xhs_cookie_set ? 'Cookie已配' : '小红书源未配置，仅基于行情与新闻选股'}
                 </Tag>
                 <span>{status?.bloggers?.length || 0}个博主 · 缓存{status?.cached_posts || 0}条</span>
               </Space>
@@ -541,6 +554,82 @@ const AIPick: React.FC = () => {
           ))
         )}
       </Card>
+
+      {/* ===== AI 选股历史战绩（20/60 交易日 · 按置信度分层，只观测不调参） ===== */}
+      {performance && performance.total_picks > 0 && (
+        <Card
+          title={
+            <Space wrap>
+              <span>📊 历史战绩（20 / 60 交易日复盘 · 按置信度分层）</span>
+              <Tag color="blue">累计记录 {performance.total_picks} 笔</Tag>
+              <Tag color="purple">只观测统计 · 不反向调参</Tag>
+            </Space>
+          }
+          style={{ marginBottom: 16, borderRadius: 8 }}
+        >
+          <Row gutter={[12, 12]}>
+            {(['high', 'medium', 'low'] as const).map((tierKey) => {
+              const tier = performance.by_confidence?.[tierKey];
+              if (!tier) return null;
+              return (
+                <Col xs={24} md={8} key={tierKey}>
+                  <Card size="small" style={{ background: colors.bgLight, borderRadius: 6 }}>
+                    <div style={{ marginBottom: 6 }}>
+                      <Tag
+                        color={CONF_COLOR[tierKey]}
+                        style={CONF_COLOR[tierKey] === 'orange' ? TAG_TEXT_FIX.orange : undefined}
+                      >
+                        {CONF_LABEL[tierKey]} ({tier.total_picks}笔)
+                      </Tag>
+                    </div>
+                    <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                      <div>
+                        <b>20交易日：</b>
+                        {tier.d20.win_rate != null ? (
+                          <span>
+                            胜率 <b style={{ color: tier.d20.win_rate >= 50 ? colors.profit : colors.loss }}>{tier.d20.win_rate}%</b>
+                            {' '}({tier.d20.win_count}/{tier.d20.matured_count}，均值{' '}
+                            <b style={{ color: (tier.d20.avg_return_pct ?? 0) >= 0 ? colors.profit : colors.loss }}>
+                              {(tier.d20.avg_return_pct ?? 0) >= 0 ? '+' : ''}{tier.d20.avg_return_pct}%
+                            </b>)
+                          </span>
+                        ) : (
+                          <span style={{ color: colors.textSecondary }}>暂无已满20交易日样本</span>
+                        )}
+                        {tier.d20.pending_count > 0 && (
+                          <Tag style={{ marginLeft: 6 }}>pending {tier.d20.pending_count}笔</Tag>
+                        )}
+                      </div>
+                      <div>
+                        <b>60交易日：</b>
+                        {tier.d60.win_rate != null ? (
+                          <span>
+                            胜率 <b style={{ color: tier.d60.win_rate >= 50 ? colors.profit : colors.loss }}>{tier.d60.win_rate}%</b>
+                            {' '}({tier.d60.win_count}/{tier.d60.matured_count}，均值{' '}
+                            <b style={{ color: (tier.d60.avg_return_pct ?? 0) >= 0 ? colors.profit : colors.loss }}>
+                              {(tier.d60.avg_return_pct ?? 0) >= 0 ? '+' : ''}{tier.d60.avg_return_pct}%
+                            </b>)
+                          </span>
+                        ) : (
+                          <span style={{ color: colors.textSecondary }}>暂无已满60交易日样本</span>
+                        )}
+                        {tier.d60.pending_count > 0 && (
+                          <Tag style={{ marginLeft: 6 }}>pending {tier.d60.pending_count}笔</Tag>
+                        )}
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+              );
+            })}
+          </Row>
+          {performance.note && (
+            <div style={{ marginTop: 8, fontSize: 12, color: colors.textSecondary }}>
+              注：{performance.note}
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* ===== 历史结果 ===== */}
       {loadingHistory ? (

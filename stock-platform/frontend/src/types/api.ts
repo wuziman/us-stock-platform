@@ -107,6 +107,7 @@ export interface PositionSummary {
   total_profit_pct: number;
   total_capital: number;
   cash_pct: number | null;
+  usd_cny_rate?: number;
   warnings: PositionWarning[];
 }
 
@@ -322,6 +323,7 @@ export interface OptimizeResult {
   best: OptimizeRow;
   results: OptimizeRow[];
   heatmap: HeatmapData;
+  in_sample_warning?: string;
 }
 
 // 🔬 Walk-Forward验证
@@ -338,6 +340,17 @@ export interface WFSegment {
   beats_buy_hold: boolean;
 }
 
+export interface WFParamStability {
+  mode_params: Record<string, number>;
+  mode_count: number;
+  mode_ratio: number;
+  mode_ratio_pct: number;
+  unique_combos: number;
+  total_segments: number;
+  stability_rating: '高' | '中' | '低' | string;
+  per_param?: Record<string, { mode: number; mode_count: number; mode_ratio: number }>;
+}
+
 export interface WFResult {
   stock_code: string;
   strategy: string;
@@ -348,11 +361,16 @@ export interface WFResult {
   segments: WFSegment[];
   stitched_oos_curve: EquityPoint[];
   oos_buy_hold_curve: EquityPoint[];
+  param_stability?: WFParamStability;
   summary: {
     avg_oos_return: number;
     avg_oos_sharpe: number;
     win_segments: number;
     total_segments: number;
+    mode_ratio?: number;
+    unique_combos?: number;
+    stability_rating?: string;
+    param_stability?: WFParamStability;
   };
 }
 
@@ -487,4 +505,49 @@ export interface WeeklyHistoryResponse {
     avg_return_pct: number;
     total_winners: number;
   } | null;
+}
+
+export interface AIPickConfidenceWindowStat {
+  matured_count: number;
+  pending_count: number;
+  win_count: number;
+  win_rate: number | null;
+  avg_return_pct: number | null;
+}
+
+export interface AIPickConfidenceTier {
+  total_picks: number;
+  d20: AIPickConfidenceWindowStat;
+  d60: AIPickConfidenceWindowStat;
+}
+
+export interface AIPickPerformanceItem {
+  id: number | null;
+  run_date: string;
+  stock_code: string;
+  stock_name: string;
+  confidence: 'high' | 'medium' | 'low' | string;
+  entry_price: number | null;
+  status_20d: 'matured' | 'pending';
+  price_20d: number | null;
+  return_20d_pct: number | null;
+  status_60d: 'matured' | 'pending';
+  price_60d: number | null;
+  return_60d_pct: number | null;
+}
+
+export interface AIPickPerformanceResponse {
+  total_picks: number;
+  overall: {
+    d20: AIPickConfidenceWindowStat;
+    d60: AIPickConfidenceWindowStat;
+  };
+  by_confidence: {
+    high: AIPickConfidenceTier;
+    medium: AIPickConfidenceTier;
+    low: AIPickConfidenceTier;
+    [key: string]: AIPickConfidenceTier;
+  };
+  picks: AIPickPerformanceItem[];
+  note?: string;
 }

@@ -4,18 +4,50 @@
 
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
+from datetime import timedelta
 from typing import List, Optional
-from ..database import get_db
+from ..database import get_db, SessionLocal
+from ..utils.timezone import now_beijing
 from ..models import AnalysisHistory
 from ..models_tracking import ScoreHistory
 from ..schemas import AnalysisRequest, AnalysisResponse
 from ..services.analysis_service import AnalysisService
-from ..services.score_tracking_service import build_tracking
+from ..services.score_tracking_service import build_tracking, build_weight_health_report
 from ..services.stock_service import StockService
 from ..utils.market import detect_market
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
 analysis_service = AnalysisService()
+
+ANALYSIS_HISTORY_RETENTION_DAYS = 90
+
+
+def cleanup_expired_analysis_history(
+    max_age_days: int = ANALYSIS_HISTORY_RETENTION_DAYS,
+    db: Optional[Session] = None,
+) -> int:
+    """清理超过 max_age_days 天（默认 90 天）的陈旧 AnalysisHistory 记录"""
+    cutoff = now_beijing() - timedelta(days=max_age_days)
+    own_session = db is None
+    sess = db or SessionLocal()
+    try:
+        rows = sess.query(AnalysisHistory).all()
+        removed = 0
+        for row in rows:
+            if row.created_at and row.created_at < cutoff:
+                sess.delete(row)
+                removed += 1
+        if removed > 0:
+            sess.commit()
+        return removed
+    except Exception as e:
+        sess.rollback()
+        print(f"清理过期AnalysisHistory失败(忽略): {e}")
+        return 0
+    finally:
+        if own_session:
+            sess.close()
+
 
 
 @router.post("", response_model=AnalysisResponse)
@@ -70,6 +102,7 @@ def analyze_stock(request: AnalysisRequest, db: Session = Depends(get_db)):
             details=result.get('details'),
         ))
         db.commit()
+        cleanup_expired_analysis_history(max_age_days=ANALYSIS_HISTORY_RETENTION_DAYS, db=db)
     except Exception as e:
         db.rollback()
         print(f"分析历史落库失败: {e}")
@@ -169,3 +202,38 @@ def get_score_tracking(stock_code: str, db: Session = Depends(get_db)):
         df = None
 
     return build_tracking(stock_code, rows, df)
+
+
+@router.get("/weight-health")
+def get_weight_health_report(
+    stock_code: Optional[str] = None,
+    window_days: int = 90,
+    forward_days: int = 20,
+    mode: str = "simple",
+    db: Session = Depends(get_db),
+):
+    """四维权重体检报告：90天滚动窗口各维相关性 + 权重±10%扰动对组合收益影响（只观测不改权重）"""
+    query = db.query(ScoreHistory)
+    if stock_code:
+        query = query.filter(ScoreHistory.stock_code == stock_code)
+    rows = query.order_by(ScoreHistory.created_at.asc(), ScoreHistory.id.asc()).all()
+    if not rows:
+        return build_weight_health_report([], {}, window_days=window_days, forward_days=forward_days, mode=mode)
+
+    codes = sorted({(r.stock_code, r.market or "US") for r in rows if r.stock_code})
+    kline_map = {}
+    for code, mkt in codes:
+        try:
+            df = StockService.get_stock_data(code, mkt, period="1y")
+            if df is not None and not df.empty:
+                kline_map[code] = df
+        except Exception:
+            pass
+
+    return build_weight_health_report(
+        rows,
+        klines_by_code=kline_map,
+        window_days=window_days,
+        forward_days=forward_days,
+        mode=mode,
+    )

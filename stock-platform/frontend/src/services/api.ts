@@ -25,6 +25,7 @@ import type {
   XhsSummaryRow,
   WeeklyAlphaResponse,
   WeeklyHistoryResponse,
+  AIPickPerformanceResponse,
 } from '../types/api';
 
 const api = axios.create({
@@ -198,6 +199,9 @@ export const aiPickApi = {
 
   getHistory: (limit: number = 30) =>
     api.get<PickRecord[]>('/ai-pick/history', { params: { limit } }),
+
+  getPerformance: (limit: number = 100) =>
+    api.get<AIPickPerformanceResponse>('/ai-pick/performance', { params: { limit } }),
 
   getXhsConfig: () => api.get<{ bloggers?: Array<{ name: string; url: string }> }>('/ai-pick/xhs-config'),
 

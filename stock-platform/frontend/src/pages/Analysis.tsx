@@ -30,6 +30,7 @@ const Analysis: React.FC = () => {
   const [subChartMode, setSubChartMode] = useState<'volume' | 'macd' | 'rsi'>('volume');
   const [riskCapital, setRiskCapital] = useState<number>(100000);
   const [searchMarket, setSearchMarket] = useState('all');
+  const [analysisMode, setAnalysisMode] = useState<'simple' | 'research'>('simple');
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [newsExpanded, setNewsExpanded] = useState(false);
@@ -161,7 +162,7 @@ const Analysis: React.FC = () => {
       const response = await analysisApi.analyze({
         stock_code: selectedStock.code,
         stock_name: selectedStock.name,
-        mode: 'simple'
+        mode: analysisMode
       });
       if (seq !== selectSeqRef.current) return; // 等待期间已切股，丢弃过期分析结果
       setAnalysisResult(response.data);
@@ -423,7 +424,7 @@ const Analysis: React.FC = () => {
             if (p.seriesType === 'scatter') {
               html += `<br/>${p.marker}${p.value[2]}`;
             } else if (p.seriesName === 'K线' && Array.isArray(p.value)) {
-              html += `<br/>${p.marker}开:${p.value[1]} 收:${p.value[2]} 低:${p.value[3]} 高:${p.value[4]}`;
+              html += `<br/>${p.marker}开:${p.value[0]} 收:${p.value[1]} 低:${p.value[2]} 高:${p.value[3]}`;
             } else if (p.value !== undefined && p.value !== null && !Array.isArray(p.value)) {
               const rawVal = typeof p.value === 'object' && p.value !== null ? p.value.value : p.value;
               html += `<br/>${p.marker}${p.seriesName}: ${rawVal}`;
@@ -688,7 +689,16 @@ const Analysis: React.FC = () => {
                 </span>
               }
               extra={
-                <Space>
+                <Space wrap>
+                  <Select
+                    value={analysisMode}
+                    onChange={(v: 'simple' | 'research') => setAnalysisMode(v)}
+                    style={{ width: 185 }}
+                    options={[
+                      { value: 'simple', label: '标准模式 (40/30/15/15)' },
+                      { value: 'research', label: '深度投研 (35/15/25/25)' },
+                    ]}
+                  />
                   <Button
                     icon={isInWatchlist ? <StarFilled /> : <StarOutlined />}
                     onClick={handleAddToWatchlist}
@@ -776,7 +786,7 @@ const Analysis: React.FC = () => {
           <Col xs={24} lg={8}>
             {analysisResult ? (
               <>
-                {analysisResult.earnings_radar?.tag && (
+                {selectedStock.market !== 'A' && analysisResult.earnings_radar?.tag && (
                   <Alert
                     style={{ marginBottom: 16, borderRadius: 8 }}
                     type={analysisResult.earnings_radar.is_imminent ? 'error' : 'warning'}

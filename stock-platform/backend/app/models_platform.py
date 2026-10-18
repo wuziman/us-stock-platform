@@ -88,3 +88,16 @@ class XhsSummary(Base):
     period_start = Column(String(10))              # 覆盖的最早帖子日期 'YYYY-MM-DD'
     period_end = Column(String(10))                # 覆盖的最新帖子日期
     created_at = Column(DateTime)
+
+
+class WeeklyTop5Snapshot(Base):
+    """周度硬科技 Alpha TOP 5 猛禽池数据库表（替代原根目录静态 JSON 文件依赖）"""
+    __tablename__ = "weekly_top5_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    scan_date = Column(String(30), index=True, nullable=False)  # 'YYYY-MM-DD HH:MM:SS' (naive 北京时间)
+    total_scanned = Column(Integer, nullable=False, default=0)
+    top5_json = Column(Text, nullable=False)                    # JSON 数组: TOP 5 标的详情
+    ai_thesis = Column(Text)                                    # AI 投研逻辑综述
+    battle_report_json = Column(Text)                           # JSON 对象: 上期战绩复盘
+    created_at = Column(DateTime)

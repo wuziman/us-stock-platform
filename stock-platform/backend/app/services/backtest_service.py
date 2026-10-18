@@ -2,8 +2,11 @@
 回测服务
 - 权益曲线：每日总资产（现金+持仓市值）
 - 统计指标：年化收益按实际天数折算、最大回撤取自真实资金曲线、夏普比率按日收益序列
+- 大盘基准：A股默认使用沪深300指数（000300.SS），美股默认使用标普500 ETF（SPY）
+- Walk-Forward：输出各段最优参数一致性/稳定性统计（众数占比、唯一组合数、稳定度评级）
 """
 
+from collections import Counter
 import itertools
 
 import pandas as pd
@@ -13,6 +16,12 @@ from .stock_service import StockService
 from ..utils.indicators import calculate_all_indicators
 from ..utils.price_levels import compute_trailing_stop
 
+
+# 市场大盘指数基准（A股统一采用沪深300指数 000300.SS，替代旧版平安银行 000001.SZ）
+BENCHMARK_BY_MARKET: Dict[str, str] = {
+    'A': '000300.SS',
+    'US': 'SPY',
+}
 
 # ============================================
 # 参数网格（寻优内置默认；请求可覆盖部分键的取值列表）
@@ -54,6 +63,34 @@ class BacktestService:
     def __init__(self):
         self.stock_service = StockService()
 
+    def _compute_index_benchmark(self, df: pd.DataFrame, market: str,
+                                 period: str, start: int = 50) -> Dict:
+        """
+        拉取所属市场的大盘指数基准（A股=000300.SS 沪深300，美股=SPY）并计算同区间基准收益率。
+        若离线或未配置基准行情，返回 benchmark_code 与 None 收益率，不阻塞主回测流程。
+        """
+        benchmark_code = BENCHMARK_BY_MARKET.get(market, 'SPY')
+        bench_return: Optional[float] = None
+        try:
+            df_bench = self.stock_service.get_stock_data(benchmark_code, market, period=period)
+            if df_bench is not None and not df_bench.empty and len(df) > start:
+                start_dt = df.index[start]
+                end_dt = df.index[-1]
+                win = df_bench[(df_bench.index >= start_dt) & (df_bench.index <= end_dt)]
+                if len(win) < 2 and len(df_bench) > start:
+                    win = df_bench.iloc[start:]
+                if len(win) >= 2:
+                    c0 = float(win.iloc[0]['Close'])
+                    c1 = float(win.iloc[-1]['Close'])
+                    if c0 > 0:
+                        bench_return = round((c1 / c0 - 1.0) * 100.0, 2)
+        except Exception:
+            bench_return = None
+        return {
+            'benchmark_code': benchmark_code,
+            'benchmark_return': bench_return,
+        }
+
     def run_backtest(self, stock_code: str, strategy: str, market: str = "US",
                      start_date: str = None, end_date: str = None,
                      initial_capital: float = 100000, period: str = "1y",
@@ -64,7 +101,7 @@ class BacktestService:
         """
         运行策略回测
 
-        period: 数据区间 1y/3y/5y（A股走东方财富前复权日K）
+        period: 数据区间 1y/3y/5y（A股走东方财富/腾讯前复权日K，基准为沪深300 000300.SS）
         commission_per_trade: 每笔交易手续费（买入/卖出各收一次，默认$1）
         params: 可选策略自定义参数（如寻优得到的最优 tp/sl 或 fast/slow）
         """
@@ -94,6 +131,13 @@ class BacktestService:
             initial_capital=initial_capital, period=period,
             commission_per_trade=commission_per_trade,
             params=extra_params if extra_params else None,
+        )
+        bench_info = self._compute_index_benchmark(df, market, period, start=50)
+        result['benchmark_code'] = bench_info['benchmark_code']
+        result['benchmark_return'] = bench_info['benchmark_return']
+        result['alpha_vs_benchmark'] = (
+            round(result['total_return'] - bench_info['benchmark_return'], 2)
+            if bench_info['benchmark_return'] is not None else None
         )
         if start_date or end_date:
             # 自定义区间时返回实际窗口，前端据此展示，避免错标成"近1年"
@@ -685,11 +729,14 @@ class BacktestService:
             'excess_vs_buy_hold': 0.0,
         })
 
+        bench_info = self._compute_index_benchmark(df, market, period, start=50)
         return {
             'stock_code': stock_code,
             'period': period,
             'initial_capital': initial_capital,
             'commission_per_trade': commission_per_trade,
+            'benchmark_code': bench_info['benchmark_code'],
+            'benchmark_return': bench_info['benchmark_return'],
             'strategies': strategies,
             'buy_hold': buy_hold,
             'comparison': comparison,
@@ -790,7 +837,7 @@ class BacktestService:
         """
         网格寻优：数据只拉一次、指标一次算好，对每个参数组合跑回测。
         返回 {stock_code, strategy, metric, best:{params,...指标}, results:[...按metric排序],
-              heatmap:{x_name,y_name,x_values,y_values,z}}
+              heatmap:{x_name,y_name,x_values,y_values,z}, in_sample_warning: str}
         （排序方向：max_drawdown 升序，其余降序）
         """
         if strategy not in PARAM_GRIDS:
@@ -822,6 +869,7 @@ class BacktestService:
         descending = metric_field != 'max_drawdown'
         results.sort(key=lambda r: r[metric_field], reverse=descending)
         best = dict(results[0])
+        best[metric] = best[metric_field]
 
         heatmap = self._build_heatmap(strategy, results, metric_field)
         return {
@@ -834,6 +882,7 @@ class BacktestService:
             'best': best,
             'results': results,
             'heatmap': heatmap,
+            'in_sample_warning': '样本内寻优，请用 Walk-Forward 验证',
         }
 
     # ============================================
@@ -859,10 +908,70 @@ class BacktestService:
             prev_last = stitched[-1]['value']
         return stitched
 
+    @staticmethod
+    def _compute_param_stability(seg_reports: List[Dict]) -> Dict:
+        """
+        统计 Walk-Forward 各段 best_params 的一致性/稳定性（判断样本内过拟合的核心依据）：
+        - mode_params: 出现频次最高的参数组合
+        - mode_count: 众数参数组合出现的段数
+        - mode_ratio: 众数占比（0~1，如 1.0 表示所有段选出完全相同的最优参数）
+        - mode_ratio_pct: 众数占比百分比（0~100）
+        - unique_combos: 各段选出的唯一参数组合个数
+        - stability_rating: 稳定度评级（'高' / '中' / '低'）
+        - per_param: 每个参数维度的众数及一致性占比
+        """
+        total = len(seg_reports)
+        if total == 0:
+            return {
+                'mode_params': {},
+                'mode_count': 0,
+                'mode_ratio': 0.0,
+                'mode_ratio_pct': 0.0,
+                'unique_combos': 0,
+                'total_segments': 0,
+                'stability_rating': '低',
+                'per_param': {},
+            }
+
+        combo_tuples = [tuple(sorted((s.get('best_params') or {}).items())) for s in seg_reports]
+        counts = Counter(combo_tuples)
+        mode_tuple, mode_count = counts.most_common(1)[0]
+        unique_combos = len(counts)
+        mode_ratio = round(mode_count / total, 4)
+        mode_ratio_pct = round(mode_count / total * 100.0, 1)
+
+        if unique_combos == 1 or mode_ratio >= 0.75:
+            rating = '高'
+        elif mode_ratio >= 0.50:
+            rating = '中'
+        else:
+            rating = '低'
+
+        per_param: Dict[str, Dict] = {}
+        all_keys = sorted({k for s in seg_reports for k in (s.get('best_params') or {}).keys()})
+        for k in all_keys:
+            vals = [s['best_params'][k] for s in seg_reports if k in (s.get('best_params') or {})]
+            if vals:
+                p_val, p_cnt = Counter(vals).most_common(1)[0]
+                per_param[k] = {
+                    'mode': p_val,
+                    'mode_count': p_cnt,
+                    'mode_ratio': round(p_cnt / len(vals), 4),
+                }
+
+        return {
+            'mode_params': dict(mode_tuple),
+            'mode_count': mode_count,
+            'mode_ratio': mode_ratio,
+            'mode_ratio_pct': mode_ratio_pct,
+            'unique_combos': unique_combos,
+            'total_segments': total,
+            'stability_rating': rating,
+            'per_param': per_param,
+        }
+
     def _warmed_df(self, df_full: pd.DataFrame, strategy: str, params: Dict) -> pd.DataFrame:
-        """在全量数据上按候选参数预计算策略指标列，解决切片冷启动暖机问题。
-        ma_cross/macd的params只决定列的计算窗口，信号逻辑固定读MA20/MA50或MACD/MACD_Signal，
-        故预计算后以默认参数调用策略函数即可命中"不重算"分支，直接使用全历史暖机的指标。"""
+        """在全量数据上按候选参数预计算策略指标列，解决切片冷启动暖机问题。"""
         if strategy == 'ma_cross':
             fast = int(params.get('fast', 20))
             slow = int(params.get('slow', 50))
@@ -895,8 +1004,7 @@ class BacktestService:
     def _select_best_params(self, df_full: pd.DataFrame, train_start: int, train_end: int,
                             fn, strategy: str,
                             initial_capital: float, commission: float) -> Tuple[Dict, float]:
-        """训练窗上跑内置网格（与optimize同一套），按夏普选最优。返回 (best_params, best_sharpe)
-        候选参数的指标在全量df上预热后切片传入，训练窗不冷启动。"""
+        """训练窗上跑内置网格（与optimize同一套），按夏普选最优。返回 (best_params, best_sharpe)"""
         best_params: Optional[Dict] = None
         best_sharpe = -np.inf
         for params in self._param_combos(strategy):
@@ -923,15 +1031,7 @@ class BacktestService:
                      period: str = "5y", initial_capital: float = 100000,
                      commission_per_trade: float = 1.0,
                      train_ratio: float = 0.6, segments: int = 2) -> Dict:
-        """
-        Walk-Forward验证：
-        - 时间轴切成 segments+1 个连续等长块（末块吸收余数）
-        - 第i步(i=1..segments)：测试块=块[i]，训练窗=测试块之前的最近 train_ratio 比例历史
-          （train_ratio=1 即完整的块[0..i-1]锚定窗口）
-        - 训练选参：与optimize相同的内置网格在该训练窗上按夏普选最优
-        - 测试段执行：最优参数+起始资金重置为initial_capital，同时算该段买入持有作对照
-        - 各测试段equity曲线rebase拼接为复合OOS净值
-        """
+        """Walk-Forward滚动验证（含各段参数稳定性统计 param_stability）"""
         if strategy not in PARAM_GRIDS:
             return {'error': f'未知策略: {strategy}'}
         segments = int(segments)
@@ -962,22 +1062,20 @@ class BacktestService:
             train_df = df.iloc[train_start:test_a]
             test_df = df.iloc[test_a:test_b]
 
-            # 训练窗上选参（样本内；候选参数指标在全量df上预热后切片）
             best_params, is_sharpe = self._select_best_params(
                 df, train_start, test_a, fn, strategy, initial_capital, commission_per_trade)
 
-            # 样本外测试：起始资金重置，start=1覆盖整个测试块（最优参数指标同样全量预热）
             warmed_best = self._warmed_df(df, strategy, best_params)
             _, curve = fn(warmed_best.iloc[test_a:test_b], initial_capital,
                           commission_per_trade,
                           self._fn_params_for_warmed(strategy, best_params), start=1)
             bh_curve, bh_ret = self._calculate_buy_hold(test_df, initial_capital, start=0)
 
-            oos_ret = round(float(curve[-1][1]) / initial_capital * 100 - 100, 2)  # float()防numpy.float64泄漏
+            oos_ret = round(float(curve[-1][1]) / initial_capital * 100 - 100, 2)
             values = [v for _, v in curve]
             days = max((test_df.index[-1] - test_df.index[0]).days, 1)
             stats = self._curve_stats(values, initial_capital, days)
-            beats = bool(oos_ret > bh_ret)  # 转Python bool，numpy.bool_无法JSON序列化
+            beats = bool(oos_ret > bh_ret)
 
             seg_reports.append({
                 'step': i,
@@ -1001,11 +1099,16 @@ class BacktestService:
             [[(p['date'], p['value']) for p in c] for c in seg_bh_curves])
 
         win_segments = sum(1 for s in seg_reports if s['beats_buy_hold'])
+        param_stability = self._compute_param_stability(seg_reports)
         summary = {
             'avg_oos_return': round(float(np.mean([s['oos_return'] for s in seg_reports])), 2),
             'avg_oos_sharpe': round(float(np.mean([s['oos_sharpe'] for s in seg_reports])), 2),
             'win_segments': win_segments,
             'total_segments': segments,
+            'mode_ratio': param_stability['mode_ratio'],
+            'unique_combos': param_stability['unique_combos'],
+            'stability_rating': param_stability['stability_rating'],
+            'param_stability': param_stability,
         }
 
         return {
@@ -1018,5 +1121,62 @@ class BacktestService:
             'segments': seg_reports,
             'stitched_oos_curve': stitched,
             'oos_buy_hold_curve': bh_stitched,
+            'param_stability': param_stability,
             'summary': summary,
+        }
+
+    def evaluate_df_profile(
+        self,
+        df: pd.DataFrame,
+        strategy: str = "nonlinear",
+        stock_code: str = "",
+        initial_capital: float = 100000.0,
+        commission_per_trade: float = 1.0,
+    ) -> Optional[Dict]:
+        """
+        【统一回测口径单点】在给定日线 DataFrame 上直接按 BacktestService 标准规则
+        （入场 bar 不判卖出 bought_this_bar=True、95% 仓位分配、每笔 $1 手续费）
+        计算完整回测指标与实测盈亏比，供实测画像生成、半凯利 L1/L2 及单测共用。
+        """
+        if df is None or len(df) < 51:
+            return None
+        dfi = calculate_all_indicators(df.copy())
+        res = self._execute_backtest(
+            df=dfi,
+            strategy=strategy,
+            stock_code=stock_code,
+            initial_capital=initial_capital,
+            period="2y",
+            commission_per_trade=commission_per_trade,
+        )
+        if "error" in res:
+            return None
+
+        sell_trades = [t for t in res.get("trades", []) if t.get("action") == "sell"]
+        wins = [float(t.get("profit_pct", 0.0)) * 100.0 for t in sell_trades if float(t.get("profit_pct", 0.0)) > 0]
+        losses = [abs(float(t.get("profit_pct", 0.0))) * 100.0 for t in sell_trades if float(t.get("profit_pct", 0.0)) < 0]
+        all_rets = [float(t.get("profit_pct", 0.0)) * 100.0 for t in sell_trades]
+
+        avg_win = float(np.mean(wins)) if wins else 0.0
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        profit_factor = round(avg_win / avg_loss, 2) if avg_loss > 0 else (1.88 if strategy == "linear" else 4.70)
+        avg_ret = round(float(np.mean(all_rets)), 2) if all_rets else 0.0
+
+        return {
+            "calibration_source": "BacktestService (95%仓位 | $1手续费 | 入场次日判离场)",
+            "strategy": strategy,
+            "total_trades": int(res["trade_count"]),
+            "wins_count": len(wins),
+            "losses_count": len(losses),
+            "win_rate": float(res["win_rate"]),
+            "avg_return": avg_ret,
+            "avg_win": round(avg_win, 2),
+            "avg_loss": round(avg_loss, 2),
+            "profit_factor": float(profit_factor),
+            "max_drawdown": float(res["max_drawdown"]),
+            "cum_return": float(res["total_return"]),
+            "total_return": float(res["total_return"]),
+            "sharpe_ratio": float(res["sharpe_ratio"]),
+            "final_value": float(res["final_value"]),
+            "trades": res["trades"],
         }

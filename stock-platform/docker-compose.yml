@@ -1,5 +1,9 @@
 version: "3.9"
 
+# 安全加固说明（API 暴露面收敛）：
+# 宿主机端口默认严格绑定回环地址 127.0.0.1（而非 0.0.0.0），
+# 防止 Docker 自动写 iptables 绕过 UFW 将无鉴权的持仓/交易/微信推送接口暴露至局域网或公网。
+# 如需跨机访问，必须前置带 HTTPS + Basic Auth / OAuth 的反向代理（Nginx/Caddy）。
 services:
   backend:
     build:
@@ -8,11 +12,12 @@ services:
     container_name: stock-platform-backend
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ../config:/app/config:ro
       - ../data:/app/data
       - ./backend/stock_platform.db:/app/stock-platform/backend/stock_platform.db
+      - ./backend/backups:/app/stock-platform/backend/backups
     environment:
       - TZ=Asia/Shanghai
 
@@ -23,6 +28,6 @@ services:
     container_name: stock-platform-frontend
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:80"
     depends_on:
       - backend

@@ -7,6 +7,7 @@ import echarts from '../services/echarts';
 import { stockApi, backtestApi } from '../services/api';
 import { colors } from '../theme/tokens';
 import { downloadCsv } from '../utils/format';
+import { formatBacktestTooltipLine } from '../utils/backtestFormat';
 import type { BacktestResult, CompareResult, SearchResult, Strategy } from '../types/api';
 
 const { Search } = Input;
@@ -84,6 +85,7 @@ const Backtest: React.FC = () => {
         start_date: values.date_range?.[0]?.format('YYYY-MM-DD'),
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
         initial_capital: values.initial_capital,
+        commission_per_trade: values.commission_per_trade ?? 1.0,
         trailing_stop: !!values.trailing_stop,
         staged_entry: !!values.staged_entry,
         params: customParams,
@@ -117,6 +119,7 @@ const Backtest: React.FC = () => {
         stock_code: selectedStock.code,
         period: values.period || '1y',
         initial_capital: values.initial_capital || 100000,
+        commission_per_trade: values.commission_per_trade ?? 1.0,
         trailing_stop: !!values.trailing_stop,
         staged_entry: !!values.staged_entry,
       });
@@ -196,8 +199,7 @@ const Backtest: React.FC = () => {
         trigger: 'axis',
         formatter: (params: any) => {
           const arr = Array.isArray(params) ? params : [params];
-          const lines = arr.map((p: any) =>
-            `${p.marker}${p.seriesName}: $${Number(p.value).toLocaleString()}`);
+          const lines = arr.map((p: any) => formatBacktestTooltipLine(p));
           return [arr[0]?.name, ...lines].join('<br/>');
         }
       },
@@ -274,7 +276,8 @@ const Backtest: React.FC = () => {
               initialValues={{
                 strategy: 'linear',
                 period: '1y',
-                initial_capital: 100000
+                initial_capital: 100000,
+                commission_per_trade: 1.0
               }}
             >
               <Row gutter={16}>
@@ -327,7 +330,7 @@ const Backtest: React.FC = () => {
               )}
 
               <Row gutter={16}>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={6}>
                   <Form.Item name="period" label="回测周期">
                     <Select
                       disabled={!!dateRangeWatch}
@@ -339,12 +342,12 @@ const Backtest: React.FC = () => {
                     />
                   </Form.Item>
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={6}>
                   <Form.Item name="date_range" label="自定义时间段（可选，优先于周期）">
                     <DatePicker.RangePicker style={{ width: '100%' }} />
                   </Form.Item>
                 </Col>
-                <Col xs={24} md={8}>
+                <Col xs={24} md={6}>
                   <Form.Item
                     name="initial_capital"
                     label="初始资金"
@@ -356,6 +359,21 @@ const Backtest: React.FC = () => {
                       step={10000}
                       formatter={value => `$ ${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
                       parser={value => Number(value?.replace(/\$\s?|(,*)/g, '') || 0)}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={6}>
+                  <Form.Item
+                    name="commission_per_trade"
+                    label="单笔手续费 ($)"
+                    tooltip="买卖每笔扣除的固定交易佣金（默认 $1/笔）"
+                  >
+                    <InputNumber<number>
+                      style={{ width: '100%' }}
+                      min={0}
+                      max={100}
+                      step={0.5}
+                      precision={2}
                     />
                   </Form.Item>
                 </Col>
@@ -412,7 +430,7 @@ const Backtest: React.FC = () => {
             strategies={strategies}
             getParams={() => {
               const v = form.getFieldsValue();
-              return { period: v.period || '1y', initial_capital: v.initial_capital || 100000 };
+              return { period: v.period || '1y', initial_capital: v.initial_capital || 100000, commission_per_trade: v.commission_per_trade ?? 1.0 };
             }}
             onApplyBestParams={(strat, bestParams) => handleRunBacktest(strat, bestParams)}
           />
@@ -422,7 +440,7 @@ const Backtest: React.FC = () => {
             strategies={strategies}
             getParams={() => {
               const v = form.getFieldsValue();
-              return { period: v.period || '1y', initial_capital: v.initial_capital || 100000 };
+              return { period: v.period || '1y', initial_capital: v.initial_capital || 100000, commission_per_trade: v.commission_per_trade ?? 1.0 };
             }}
           />
         </Col>

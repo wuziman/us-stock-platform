@@ -1,6 +1,10 @@
 """
 每日报告服务
 - 汇总自选股：双策略点位（含ATR自适应动态止损与+10%保本位） + MACD状态 + 技术评分
+- 市场风控状态（NORMAL / CAUTION / CIRCUIT_BREAKER）真实联动买卖点位与仓位比例（受 regime_linkage_enabled 全局总开关统管）：
+  * CAUTION 档：linear / nonlinear 买点（buy / buy_low）真实下移 2%，建议仓位减半（position_scale=0.5）
+  * CIRCUIT_BREAKER 档：全面冻结新开仓买点（buy=None, buy_low=None, macd_add=None, macd_watch=None, position_scale=0.0）
+  * 当 regime_linkage_enabled=false 时：顶部大盘风控横幅照常展示实况，但点位与仓位强制按 NORMAL (1.0) 输出原始值
 - 并行拉取多只自选股快照，大幅缩短日报生成耗时
 - 生成企业微信markdown日报
 - 通过webhook推送（支持dry_run预览与超长报告无损智能分包）
@@ -9,25 +13,43 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
 import time
-from datetime import datetime
 from typing import Dict, List, Optional
 import requests
 import pandas as pd
 
+from ..database import SessionLocal
+from ..models import Setting
 from .stock_service import StockService
 from .tech_score import calculate_tech_score
 from ..utils.indicators import calculate_all_indicators
 from ..utils.market import detect_market
 from ..utils.app_config import load_config
+from ..utils.timezone import now_beijing
 from ..utils.price_levels import (
+    CAUTION_BUY_DISCOUNT,
     LINEAR_PROFIT_PCT,
     NONLINEAR_PROFIT_PCT,
-    atr_adaptive_levels,
+    apply_regime_to_levels,
     discipline_stop,
+    evaluate_market_regime,
     linear_buy_point,
     macd_state_days,
     nonlinear_buy_point,
 )
+
+
+def _is_regime_linkage_on() -> bool:
+    """读取 Setting 表中的 regime_linkage_enabled 开关（默认 True）"""
+    db = SessionLocal()
+    try:
+        row = db.query(Setting).filter(Setting.key == "regime_linkage_enabled").first()
+        if row is None or row.value is None:
+            return True
+        return str(row.value).strip().lower() not in ("false", "0", "no", "off")
+    except Exception:
+        return True
+    finally:
+        db.close()
 
 
 def _load_webhook() -> str:
@@ -50,7 +72,6 @@ def split_wechat_chunks(report: str, max_bytes: int = 3800) -> List[str]:
                 chunks.append(current)
                 current = block
             else:
-                # 单个超长块兜底按行切分
                 lines = block.split('\n')
                 sub = ''
                 for ln in lines:
@@ -73,15 +94,62 @@ class ReportService:
 
     def __init__(self):
         self.stock_service = StockService()
+        self._active_regime: Optional[Dict] = None
+        self._active_as_of_date: Optional[str] = None
+        self._active_linkage_enabled: bool = True
+
+    def get_market_regime(self, as_of_date: Optional[str] = None) -> Dict:
+        """
+        获取大盘波动率与熔断风控状态（支持传入 as_of_date 回放指定历史交易日，如 '2026-10-15'）。
+        优先通过 stock_service 拉取 ^VIX 与 QQQ 日线；若离线无数据则安全回退 NORMAL。
+        """
+        vix_val = 15.0
+        qqq_change = 0.0
+        try:
+            vix_df = self.stock_service.get_stock_data("^VIX", "US", period="1mo")
+            if vix_df is not None and not vix_df.empty:
+                if as_of_date:
+                    vix_df = vix_df[vix_df.index <= as_of_date]
+                if not vix_df.empty:
+                    vix_val = float(vix_df['Close'].iloc[-1])
+        except Exception:
+            pass
+
+        try:
+            qqq_df = self.stock_service.get_stock_data("QQQ", "US", period="1mo")
+            if qqq_df is not None and not qqq_df.empty:
+                if as_of_date:
+                    qqq_df = qqq_df[qqq_df.index <= as_of_date]
+                if len(qqq_df) >= 2:
+                    c1 = float(qqq_df['Close'].iloc[-1])
+                    c0 = float(qqq_df['Close'].iloc[-2])
+                    if c0 > 0:
+                        qqq_change = (c1 - c0) / c0 * 100.0
+        except Exception:
+            pass
+
+        return evaluate_market_regime(vix_val, qqq_change)
 
     # ============================================
-    # 单只股票：三策略快照（轻量，不拉新闻）
+    # 单只股票：三策略快照（轻量，不拉新闻，支持熔断状态真实联动点位）
     # ============================================
-    def _stock_snapshot(self, stock_code: str, stock_name: str) -> Optional[Dict]:
+    def _stock_snapshot(
+        self,
+        stock_code: str,
+        stock_name: str,
+        regime: Optional[Dict] = None,
+        as_of_date: Optional[str] = None,
+    ) -> Optional[Dict]:
         market = detect_market(stock_code)
         df = self.stock_service.get_stock_data(stock_code, market, period="3mo")
         if df is None or df.empty:
             return None
+
+        eff_as_of = as_of_date or self._active_as_of_date
+        if eff_as_of:
+            df = df[df.index <= eff_as_of]
+            if df.empty:
+                return None
 
         df = calculate_all_indicators(df)
         latest = df.iloc[-1]
@@ -94,7 +162,7 @@ class ReportService:
         bb_lower = float(bb_lower) if pd.notna(bb_lower) else current * 0.9
         atr_val = float(latest['ATR']) if 'ATR' in latest and pd.notna(latest['ATR']) else None
 
-        # 线性/非线性点位公式走共享模块（utils/price_levels.py，唯一定义处）
+        # 线性/非线性常态基准买点（走 utils/price_levels.py 唯一定义处）
         linear_buy = linear_buy_point(current, ma20)
         nonlinear_buy = nonlinear_buy_point(rsi, ma20, bb_lower)
 
@@ -121,6 +189,46 @@ class ReportService:
         else:
             rec, color = '谨慎', 'warning'
 
+        # 若调用方显式传入 regime 参数则强制按传入值执行；否则尊重全局 regime_linkage_enabled 开关
+        if regime is not None:
+            eff_regime = regime
+            linkage_on = True
+        else:
+            eff_regime = self._active_regime or {'status': 'NORMAL', 'position_scale': 1.0}
+            linkage_on = self._active_linkage_enabled
+
+        raw_regime_status = (eff_regime.get('status') or 'NORMAL').upper()
+        effective_status = raw_regime_status if linkage_on else 'NORMAL'
+
+        linear_levels = apply_regime_to_levels(
+            current, linear_buy, LINEAR_PROFIT_PCT,
+            regime_status=effective_status, atr=atr_val,
+            stop_atr_mult=2.0, profit_atr_mult=3.5,
+        )
+        nonlinear_levels = apply_regime_to_levels(
+            current, nonlinear_buy, NONLINEAR_PROFIT_PCT,
+            regime_status=effective_status, atr=atr_val,
+            stop_atr_mult=2.2, profit_atr_mult=6.5,
+        )
+
+        macd_add = round(ma20, 2) if macd_golden else None
+        macd_watch = round(bb_lower, 2) if macd_golden is False else None
+        position_scale = 1.0
+
+        if effective_status == 'CAUTION':
+            position_scale = 0.5
+            if macd_add is not None:
+                macd_add = round(macd_add * CAUTION_BUY_DISCOUNT, 2)
+            if macd_watch is not None:
+                macd_watch = round(macd_watch * CAUTION_BUY_DISCOUNT, 2)
+            if '买入' in rec:
+                rec, color = '谨慎建仓(半仓)', 'warning'
+        elif effective_status == 'CIRCUIT_BREAKER':
+            position_scale = 0.0
+            macd_add = None
+            macd_watch = None
+            rec, color = '熔断避险', 'warning'
+
         return {
             'code': stock_code,
             'name': stock_name,
@@ -130,23 +238,41 @@ class ReportService:
             'tech': round(tech, 1),
             'rec': rec,
             'color': color,
+            'regime_status': effective_status,
+            'raw_regime_status': raw_regime_status,
+            'regime_linkage_enabled': linkage_on,
+            'position_scale': position_scale,
             'macd_state': macd_state,
             'macd_golden': macd_golden,
-            # MACD策略操作参考
-            'macd_add': round(ma20, 2) if macd_golden else None,          # 金叉：回踩MA20加仓参考
-            'macd_watch': round(bb_lower, 2) if macd_golden is False else None,  # 死叉：关注布林下轨
+            # MACD策略操作参考（熔断档全部置None，禁止新开仓）
+            'macd_add': macd_add,
+            'macd_watch': macd_watch,
             'macd_stop': discipline_stop(current),                        # 纪律止损-8%
-            'linear': atr_adaptive_levels(current, linear_buy, LINEAR_PROFIT_PCT, atr=atr_val, atr_mult=2.0),
-            'nonlinear': atr_adaptive_levels(current, nonlinear_buy, NONLINEAR_PROFIT_PCT, atr=atr_val, atr_mult=2.2),
+            'linear': linear_levels,
+            'nonlinear': nonlinear_levels,
         }
 
     # ============================================
-    # 生成日报（企业微信markdown格式，支持并行快照）
+    # 生成日报（企业微信markdown格式，支持并行快照与市场风控状态真实联动）
     # ============================================
-    def generate_daily_report(self, watchlist: List[Dict]) -> Dict:
-        """watchlist: [{stock_code, stock_name}] → {report, snapshots, failed}"""
+    def generate_daily_report(
+        self,
+        watchlist: List[Dict],
+        regime: Optional[Dict] = None,
+        as_of_date: Optional[str] = None,
+    ) -> Dict:
+        """watchlist: [{stock_code, stock_name}] → {report, snapshots, failed, regime}"""
         snapshots: List[Dict] = []
         failed: List[str] = []
+
+        linkage_on = True if regime is not None else _is_regime_linkage_on()
+        resolved_regime = regime if regime is not None else self.get_market_regime(as_of_date=as_of_date)
+        prev_regime = self._active_regime
+        prev_as_of = self._active_as_of_date
+        prev_linkage = self._active_linkage_enabled
+        self._active_regime = resolved_regime
+        self._active_as_of_date = as_of_date
+        self._active_linkage_enabled = linkage_on
 
         def _safe_snap(item: Dict):
             code = item['stock_code']
@@ -158,24 +284,37 @@ class ReportService:
                 print(f"快照失败 {code}: {e}")
                 return (None, f"{code} {name}")
 
-        if watchlist:
-            with ThreadPoolExecutor(max_workers=min(8, len(watchlist))) as executor:
-                results = list(executor.map(_safe_snap, watchlist))
-            for snap, err in results:
-                if snap:
-                    snapshots.append(snap)
-                elif err:
-                    failed.append(err)
+        try:
+            if watchlist:
+                with ThreadPoolExecutor(max_workers=min(8, len(watchlist))) as executor:
+                    results = list(executor.map(_safe_snap, watchlist))
+                for snap, err in results:
+                    if snap:
+                        snapshots.append(snap)
+                    elif err:
+                        failed.append(err)
+        finally:
+            self._active_regime = prev_regime
+            self._active_as_of_date = prev_as_of
+            self._active_linkage_enabled = prev_linkage
 
         # 按技术分排序
         snapshots.sort(key=lambda s: s['tech'], reverse=True)
 
-        now = datetime.now()
+        now = now_beijing()
+        regime_status = (resolved_regime.get('status') or 'NORMAL').upper()
         lines = [
             f"**📈 股票日报·三策略版** {now.strftime('%m-%d %H:%M')}",
             f"> 自选{len(snapshots)}只 | 按技术评分排序",
-            '',
         ]
+        if regime_status != 'NORMAL':
+            lines.append(f"> 🛡️ **大盘风控**: {resolved_regime.get('banner', regime_status)}")
+            if linkage_on:
+                lines.append(f"> 📌 **执行指令**: {resolved_regime.get('advice', '')}")
+            else:
+                lines.append("> 📌 **执行指令**: 熔断联动开关已关闭，以下展示未折算的原始策略点位")
+        lines.append('')
+
         for i, s in enumerate(snapshots, 1):
             price_str = f"¥{s['price']}" if s['market'] == 'A' else f"${s['price']}"
             lines.append(
@@ -184,21 +323,36 @@ class ReportService:
             lines.append(
                 f"现价{price_str} RSI{s['rsi']} MACD:{s['macd_state']}"
             )
-            lin_atr_suffix = (
-                f" (ATR损{s['linear']['atr_stop']})"
-                if s['linear'].get('atr_stop') and s['linear']['atr_stop'] != s['linear']['stop']
-                else ""
-            )
-            lines.append(
-                f"线性: 买{s['linear']['buy']}({s['linear']['distance']:+.1f}%) "
-                f"盈{s['linear']['profit']} 损{s['linear']['stop']}{lin_atr_suffix}"
-            )
-            lines.append(
-                f"非线性: 买{s['nonlinear']['buy']}({s['nonlinear']['distance']:+.1f}%) "
-                f"盈{s['nonlinear']['profit']} 损{s['nonlinear']['stop']}"
-            )
-            # MACD策略操作参考
-            if s.get('macd_golden'):
+            if s['linear'].get('buy') is None:
+                lines.append(
+                    f"线性: 🚫熔断禁买(无新开仓点位) 持仓保护损{s['linear']['stop']}"
+                )
+            else:
+                lin_atr_suffix = (
+                    f" (ATR损{s['linear']['atr_stop']})"
+                    if s['linear'].get('atr_stop') and s['linear']['atr_stop'] != s['linear']['stop']
+                    else ""
+                )
+                caution_tag = " [买点已下移2%/半仓]" if s.get('regime_status') == 'CAUTION' else ""
+                lines.append(
+                    f"线性: 买{s['linear']['buy']}({s['linear']['distance']:+.1f}%) "
+                    f"盈{s['linear']['profit']} 损{s['linear']['stop']}{lin_atr_suffix}{caution_tag}"
+                )
+
+            if s['nonlinear'].get('buy') is None:
+                lines.append(
+                    f"非线性: 🚫熔断禁买(无新开仓点位) 持仓保护损{s['nonlinear']['stop']}"
+                )
+            else:
+                caution_tag = " [买点已下移2%/半仓]" if s.get('regime_status') == 'CAUTION' else ""
+                lines.append(
+                    f"非线性: 买{s['nonlinear']['buy']}({s['nonlinear']['distance']:+.1f}%) "
+                    f"盈{s['nonlinear']['profit']} 损{s['nonlinear']['stop']}{caution_tag}"
+                )
+
+            if s.get('regime_status') == 'CIRCUIT_BREAKER':
+                lines.append(f"MACD: {s['macd_state']} 🚨熔断禁买(无新开仓点位) 持仓保护损{s['macd_stop']}")
+            elif s.get('macd_golden'):
                 lines.append(
                     f"MACD: {s['macd_state']} ✅持有 加仓MA20 {s['macd_add']} "
                     f"离场=死叉 损{s['macd_stop']}"
@@ -221,6 +375,8 @@ class ReportService:
             'report': report,
             'snapshots': snapshots,
             'failed': failed,
+            'regime': resolved_regime,
+            'regime_linkage_enabled': linkage_on,
             'generated_at': now.isoformat(),
             'char_count': len(report.encode('utf-8')),
         }

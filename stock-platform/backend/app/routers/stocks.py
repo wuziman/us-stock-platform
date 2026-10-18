@@ -60,6 +60,9 @@ def get_history(code: str, market: str = "US", period: str = "3mo"):
     def _num(v, digits=3):
         return round(float(v), digits) if v is not None and not pd.isna(v) else None
 
+    def _vol(v):
+        return int(float(v)) if v is not None and not pd.isna(v) else None
+
     # 转换为JSON格式
     data = []
     for index, row in df.iterrows():
@@ -69,7 +72,7 @@ def get_history(code: str, market: str = "US", period: str = "3mo"):
             'high': _num(row['High']),
             'low': _num(row['Low']),
             'close': _num(row['Close']),
-            'volume': int(row['Volume']),
+            'volume': _vol(row.get('Volume')),
             'ma5': _num(row.get('MA5')),
             'ma20': _num(row.get('MA20')),
             'ma50': _num(row.get('MA50')),
@@ -175,10 +178,11 @@ def get_market_regime():
 
 @router.get("/earnings-calendar")
 def get_earnings_calendar(db: Session = Depends(get_db)):
-    """自选股财报日历（并行拉取）：美股走yfinance日历；A股尝试.SZ/.SS后缀，拿不到则日期为空"""
-    watchlist = db.query(Watchlist).order_by(Watchlist.created_at.desc()).all()
+    """美股自选股财报日历（并行拉取）：仅针对美股(US)查询yfinance日历，A股自动跳过不纳入no_data"""
+    all_watchlist = db.query(Watchlist).order_by(Watchlist.created_at.desc()).all()
+    watchlist = [w for w in all_watchlist if (w.market or 'US') != 'A']
     if not watchlist:
-        return {'items': [], 'no_data': []}
+        return {'items': [], 'no_data': [], 'cn_hidden': True}
 
     today = date.today()
 

@@ -103,5 +103,110 @@
         "return_pct": 1.82
       }
     }
+  },
+  {
+    "scan_date": "2026-10-15 20:46:46",
+    "top5": [
+      {
+        "code": "DELL",
+        "name": "戴尔科技",
+        "sector": "企业级AI服务器",
+        "total_score": 80.0,
+        "current_price": 473.39
+      },
+      {
+        "code": "PLTR",
+        "name": "Palantir",
+        "sector": "企业级AI决策操作系统",
+        "total_score": 79.0,
+        "current_price": 200.5
+      },
+      {
+        "code": "ASML",
+        "name": "阿斯麦",
+        "sector": "EUV光刻机绝对垄断",
+        "total_score": 75.0,
+        "current_price": 1657.44
+      },
+      {
+        "code": "ANET",
+        "name": "阿里斯塔",
+        "sector": "800G AI数据中心网络",
+        "total_score": 75.0,
+        "current_price": 185.58
+      },
+      {
+        "code": "AMD",
+        "name": "超威半导体",
+        "sector": "GPU与数据中心CPU",
+        "total_score": 74.2,
+        "current_price": 562.23
+      }
+    ],
+    "battle_report": {
+      "prev_scan_date": "2026-09-04 17:19:48",
+      "review_date": "2026-10-15 20:45:19",
+      "picks": [
+        {
+          "code": "SMCI",
+          "name": "超微电脑",
+          "sector": "高密AI服务器整机柜",
+          "entry_price": 37.87,
+          "review_price": 35.09,
+          "weekly_return_pct": -7.34,
+          "is_winner": false
+        },
+        {
+          "code": "DELL",
+          "name": "戴尔科技",
+          "sector": "企业级AI服务器",
+          "entry_price": 516.39,
+          "review_price": 473.39,
+          "weekly_return_pct": -8.33,
+          "is_winner": false
+        },
+        {
+          "code": "MU",
+          "name": "美光科技",
+          "sector": "HBM3e高带宽存储",
+          "entry_price": 958.16,
+          "review_price": 931.24,
+          "weekly_return_pct": -2.81,
+          "is_winner": false
+        },
+        {
+          "code": "HPE",
+          "name": "慧与科技",
+          "sector": "高性能超算与企业云",
+          "entry_price": 54.44,
+          "review_price": 58.63,
+          "weekly_return_pct": 7.7,
+          "is_winner": true
+        },
+        {
+          "code": "ASML",
+          "name": "阿斯麦",
+          "sector": "EUV光刻机绝对垄断",
+          "entry_price": 1646.19,
+          "review_price": 1657.44,
+          "weekly_return_pct": 0.68,
+          "is_winner": true
+        }
+      ],
+      "win_count": 2,
+      "loss_count": 3,
+      "win_rate": 40.0,
+      "avg_return_pct": -2.02,
+      "best_pick": {
+        "code": "HPE",
+        "name": "慧与科技",
+        "return_pct": 7.7
+      },
+      "worst_pick": {
+        "code": "DELL",
+        "name": "戴尔科技",
+        "return_pct": -8.33
+      }
+    }
   }
 ]

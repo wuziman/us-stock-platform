@@ -257,6 +257,7 @@ const Home: React.FC = () => {
   const getPortfolioChartOption = () => {
     if (!summary) return {};
     const capital = summary.total_capital || 0;
+    const fxRate = summary.usd_cny_rate && summary.usd_cny_rate > 0 ? summary.usd_cny_rate : 1;
     const palette = [colors.primary, colors.chartPurple, colors.ma5, colors.profit, '#13c2c2', '#eb2f96'];
     const data: Array<{ value: number; name: string; itemStyle?: { color: string } }> = [];
 
@@ -264,7 +265,7 @@ const Home: React.FC = () => {
       const hasMixed = positions.some(p => p.market === 'A') && positions.some(p => p.market !== 'A');
       positions.forEach((p, idx) => {
         const px = p.current_price ?? p.buy_price;
-        const scale = hasMixed && p.market === 'A' ? 1 / 7.2 : 1;
+        const scale = hasMixed && p.market === 'A' ? 1 / fxRate : 1;
         const val = Math.round(px * p.quantity * scale * 100) / 100;
         if (val > 0) {
           data.push({
@@ -288,7 +289,7 @@ const Home: React.FC = () => {
     return {
       tooltip: {
         trigger: 'item',
-        formatter: '{b}: ${c} ({d}%)'
+        formatter: '{b}: {c} ({d}%)'
       },
       legend: { bottom: 0, type: 'scroll' },
       series: [{
@@ -501,10 +502,11 @@ const Home: React.FC = () => {
         </Col>
       </Row>
 
-      {/* 财报日历 */}
+      {/* 财报日历（仅针对美股展示；当自选股全为A股时自动隐藏该卡片） */}
+      {!(watchlist.length > 0 && watchlist.every((w) => w.market === 'A')) && (
       <Row style={{ marginTop: 16 }}>
         <Col span={24}>
-          <Card title="📅 自选股财报日历">
+          <Card title="📅 美股自选财报日历">
             {earningsItems.length > 0 ? (
               <Space size={[24, 12]} wrap>
                 {earningsItems.map((e) => (
@@ -527,6 +529,7 @@ const Home: React.FC = () => {
           </Card>
         </Col>
       </Row>
+      )}
 
       {/* 定时自动日报 */}
       <Row style={{ marginTop: 16 }}>

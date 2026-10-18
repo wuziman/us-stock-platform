@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app/stock-platform/backend
 
-COPY stock-platform/backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY stock-platform/backend/requirements.txt stock-platform/backend/requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY . /app
 

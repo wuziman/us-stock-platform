@@ -6,8 +6,11 @@
 """
 
 import logging
-from datetime import datetime, date
-from typing import Dict, Optional
+import re
+import shutil
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
@@ -17,6 +20,8 @@ from ..models import Watchlist, Setting
 from .report_service import ReportService
 from .alert_service import run_price_monitor
 from .stock_service import cleanup_expired_kline_cache
+from ..routers.analysis import cleanup_expired_analysis_history
+from ..utils.timezone import SH_TZ, now_beijing, today_beijing
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +64,71 @@ def get_schedule_config(db: Session) -> Dict:
         'hour': hour,
         'minute': minute,
         'last_sent_date': _get_setting(db, KEY_LAST_SENT, '') or None,
+    }
+
+
+
+# ============================================
+# 本地 SQLite 数据库每日备份与 30 天滚动清理
+# ============================================
+BACKUP_RETENTION_DAYS = 30
+
+
+def backup_database(
+    db_path: Optional[Path] = None,
+    backup_dir: Optional[Path] = None,
+    retention_days: int = BACKUP_RETENTION_DAYS,
+    now_dt: Optional[datetime] = None,
+    force: bool = False,
+) -> Dict:
+    """
+    每日将 stock_platform.db 备份至 backups/stock_platform_YYYYMMDD.db，
+    并自动清理超过 retention_days（默认 30 天）的历史备份文件。
+    """
+    backend_root = Path(__file__).resolve().parents[2]
+    src_db = Path(db_path) if db_path is not None else (backend_root / "stock_platform.db")
+    dst_dir = Path(backup_dir) if backup_dir is not None else (backend_root / "backups")
+    ref_dt = now_dt or now_beijing()
+    date_tag = ref_dt.strftime("%Y%m%d")
+    dst_file = dst_dir / f"stock_platform_{date_tag}.db"
+
+    created = False
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        if src_db.exists() and (force or not dst_file.exists()):
+            shutil.copy2(src_db, dst_file)
+            created = True
+    except Exception as e:
+        logger.warning(f"数据库备份失败: {e}")
+
+    deleted_files: List[str] = []
+    cutoff_date = ref_dt.date() - timedelta(days=retention_days)
+    try:
+        if dst_dir.exists():
+            # 同时遍历 glob 与显式扫描，兼容特殊文件系统缓存
+            for f in sorted(dst_dir.glob("stock_platform_*.db")):
+                m = re.match(r"^stock_platform_(\d{8})\.db$", f.name)
+                if not m:
+                    continue
+                try:
+                    file_date = datetime.strptime(m.group(1), "%Y%m%d").date()
+                except ValueError:
+                    continue
+                if file_date < cutoff_date:
+                    try:
+                        f.unlink()
+                        deleted_files.append(f.name)
+                    except Exception as del_err:
+                        logger.warning(f"清理过期备份失败 {f.name}: {del_err}")
+    except Exception as e:
+        logger.warning(f"扫描过期备份异常: {e}")
+
+    return {
+        "backup_file": str(dst_file),
+        "backup_name": dst_file.name,
+        "created": created,
+        "deleted_files": deleted_files,
+        "retention_days": retention_days,
     }
 
 
@@ -122,7 +192,9 @@ def scheduled_job():
     """APScheduler每30分钟触发：顺带清理过期K线缓存，到达推送窗口且今日未发时执行日报"""
     try:
         cleanup_expired_kline_cache(max_age_hours=24)
-        now = datetime.now()
+        cleanup_expired_analysis_history(max_age_days=90)
+        backup_database(retention_days=BACKUP_RETENTION_DAYS)
+        now = now_beijing()
         db = SessionLocal()
         try:
             cfg = get_schedule_config(db)
@@ -137,10 +209,10 @@ def scheduled_job():
         logger.info("到达定时日报推送窗口，开始生成并推送")
         result = run_now()
         if result.get('sent'):
-            # 成功后记录今天已发送，防止窗口内重复推送
+            # 成功后记录今天已发送（北京时间日期），防止窗口内重复推送
             db = SessionLocal()
             try:
-                _set_setting(db, KEY_LAST_SENT, date.today().isoformat())
+                _set_setting(db, KEY_LAST_SENT, today_beijing().isoformat())
             finally:
                 db.close()
             logger.info("定时日报推送成功")
@@ -177,7 +249,7 @@ def start_scheduler(app) -> BackgroundScheduler:
         id='daily_report_job',
         max_instances=1,   # 上一次未跑完时不并发
         coalesce=True,     # 积压多次触发合并为一次
-        next_run_time=datetime.now(),  # 启动即检查一次，避免错过临近的推送窗口
+        next_run_time=SH_TZ.localize(now_beijing()),  # 启动即检查一次（显式北京时间）
     )
     scheduler.add_job(
         price_monitor_job,

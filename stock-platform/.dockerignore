@@ -1,0 +1,18 @@
+# SQLite 数据库及 WAL/SHM 临时文件（严禁打入镜像）
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+
+# 前端依赖与构建产物
+node_modules/
+dist/
+.git/

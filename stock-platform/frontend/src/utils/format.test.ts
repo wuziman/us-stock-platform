@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { colors } from '../theme/tokens';
-import { buildCsvContent, calcPositionSize, currencySymbol, fmtDist, fmtPx, pctColor } from './format';
+import { buildCsvContent, calcPositionSize, currencySymbol, fmtDist, fmtPx, pctColor, resolvePositionsViewState } from './format';
 
 describe('fmtPx 价格格式化', () => {
   it('两位小数带美元符（默认美股）', () => {
@@ -77,5 +77,21 @@ describe('buildCsvContent UTF-8 BOM 与转义', () => {
     expect(csv.startsWith('\uFEFF代码,备注\r\n')).toBe(true);
     expect(csv.includes('MU,"含,逗号"')).toBe(true);
     expect(csv.includes('NVDA,"含""引号"""')).toBe(true);
+  });
+});
+
+describe('resolvePositionsViewState 持仓页三态（loading / error / empty / ready）防误导', () => {
+  it('加载中优先返回 loading', () => {
+    expect(resolvePositionsViewState(true, false, 0)).toBe('loading');
+    expect(resolvePositionsViewState(true, true, 0)).toBe('loading');
+  });
+  it('接口失败时即使 positions.length===0 也必须返回 error，严禁返回 empty 渲染成暂无持仓', () => {
+    expect(resolvePositionsViewState(false, true, 0)).toBe('error');
+  });
+  it('接口成功且长度为 0 时才返回 empty', () => {
+    expect(resolvePositionsViewState(false, false, 0)).toBe('empty');
+  });
+  it('接口成功且有持仓时返回 ready', () => {
+    expect(resolvePositionsViewState(false, false, 3)).toBe('ready');
   });
 });

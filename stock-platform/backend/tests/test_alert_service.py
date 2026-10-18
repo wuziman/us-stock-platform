@@ -90,6 +90,18 @@ class TestIsMarketOpen:
         assert is_trading_holiday('A', date(2026, 10, 1)) is True
         assert is_market_open('A', SH_TZ.localize(datetime(2026, 10, 1, 10, 30))) is False
 
+    def test_us_good_friday_and_cn_lunar_holidays_closed(self):
+        """[第二段-5 验证] 美股耶稣受难日（Good Friday）及A股春节/清明/端午/中秋休市"""
+        # 美股耶稣受难日：2025-04-18、2026-04-03、2027-03-26 均为周五
+        for gf in (date(2025, 4, 18), date(2026, 4, 3), date(2027, 3, 26)):
+            assert is_trading_holiday('US', gf) is True
+        assert is_market_open('US', SH_TZ.localize(datetime(2026, 4, 3, 22, 0))) is False
+
+        # A股春节(2026-02-17 周二)、清明(2026-04-06 周一)、端午(2026-06-19 周五)、中秋(2026-09-25 周五)
+        for cn_hd in (date(2026, 2, 17), date(2026, 4, 6), date(2026, 6, 19), date(2026, 9, 25)):
+            assert is_trading_holiday('A', cn_hd) is True
+            assert is_market_open('A', SH_TZ.localize(datetime(cn_hd.year, cn_hd.month, cn_hd.day, 10, 30))) is False
+
 
 # ============================================
 # 财报日期挑选
@@ -113,6 +125,129 @@ class TestPickNextEarningsDate:
         today = date(2026, 8, 23)
         assert pick_next_earnings_date(None, today) is None
         assert pick_next_earnings_date(['garbage', None], today) is None
+
+
+
+
+# ============================================
+# [第四段-10a] 告警真实链路集成测试（不 mock 被测函数本身，仅 mock 行情与微信 HTTP 边界）
+# ============================================
+class TestAlertChainIntegration:
+    def _clean_db(self):
+        from app.database import SessionLocal
+        from app.models import Position, Setting
+        from app.models_platform import PriceAlertLog, PortfolioSnapshot
+        db = SessionLocal()
+        try:
+            db.query(Position).delete()
+            db.query(PriceAlertLog).delete()
+            db.query(PortfolioSnapshot).delete()
+            db.query(Setting).filter(Setting.key == "price_alert_enabled").delete()
+            db.commit()
+        finally:
+            db.close()
+
+    def test_stop_loss_and_take_profit_chain_with_dedup_and_retry(self, monkeypatch):
+        """
+        验证 check_position_alerts 真实链路：
+        1. 跌破止损 / 突破止盈触发微信推送并落库 PriceAlertLog
+        2. 同日二次触发被 _alert_already_sent 幂等拦截（不重复推）
+        3. 若微信推送失败（sent=False），不落库 PriceAlertLog，下一轮自动重试成功
+        """
+        from app.database import SessionLocal
+        from app.models import Position
+        from app.models_platform import PriceAlertLog
+        from app.services.alert_service import check_position_alerts
+        from app.services.report_service import ReportService
+        from app.services.stock_service import StockService
+
+        self._clean_db()
+        db = SessionLocal()
+        try:
+            pos_sl = Position(
+                stock_code="MU", stock_name="Micron", market="US",
+                buy_price=100.0, quantity=10, buy_date=datetime(2026, 10, 1, 10, 0),
+                stop_loss=92.0, take_profit=115.0, status="holding",
+            )
+            pos_tp = Position(
+                stock_code="NVDA", stock_name="NVIDIA", market="US",
+                buy_price=100.0, quantity=10, buy_date=datetime(2026, 10, 1, 10, 0),
+                stop_loss=92.0, take_profit=115.0, status="holding",
+            )
+            db.add_all([pos_sl, pos_tp])
+            db.commit()
+
+            quotes = {"MU": {"price": 90.0}, "NVDA": {"price": 120.0}}
+            monkeypatch.setattr(StockService, "get_realtime_quote", staticmethod(lambda code, mkt="US": quotes.get(code)))
+
+            report_svc = ReportService()
+            sent_messages = []
+
+            # 第1轮：模拟网络抖动推送失败 -> 不写 PriceAlertLog
+            monkeypatch.setattr(report_svc, "send_to_wechat", lambda msg: {"sent": False, "error": "net_err"})
+            res_fail = check_position_alerts(report_svc, today="2026-10-16")
+            assert len(res_fail) == 2
+            assert all(r["sent"] is False for r in res_fail)
+            assert db.query(PriceAlertLog).count() == 0
+
+            # 第2轮：微信恢复正常 -> 两条告警全部推送成功并落库
+            monkeypatch.setattr(report_svc, "send_to_wechat", lambda msg: (sent_messages.append(msg) or {"sent": True}))
+            res_ok = check_position_alerts(report_svc, today="2026-10-16")
+            assert len(res_ok) == 2
+            assert all(r["sent"] is True for r in res_ok)
+            assert len(sent_messages) == 2
+            assert db.query(PriceAlertLog).count() == 2
+
+            # 第3轮：同一天再次运行 -> 去重生效，0条重复推送
+            res_dup = check_position_alerts(report_svc, today="2026-10-16")
+            assert res_dup == []
+            assert len(sent_messages) == 2
+        finally:
+            self._clean_db()
+            db.close()
+
+    def test_full_run_price_monitor_snapshot_and_drawdown_alert(self, monkeypatch):
+        """
+        验证 run_price_monitor -> update_portfolio_snapshot -> check_drawdown_alert 全链路：
+        历史净值峰值 $100,000，当前持仓跌至 $75,000（回撤 25% >= 20% 阈值）-> 自动更新今日快照并推送回撤破线告警
+        """
+        import app.services.alert_service as alert_mod
+        from app.database import SessionLocal
+        from app.models import Position
+        from app.models_platform import PortfolioSnapshot
+        from app.services.report_service import ReportService
+        from app.services.stock_service import StockService
+
+        self._clean_db()
+        db = SessionLocal()
+        try:
+            db.add(PortfolioSnapshot(snap_date="2026-10-10", total_value=100000.0))
+            db.add(Position(
+                stock_code="MU", stock_name="Micron", market="US",
+                buy_price=100.0, quantity=1000, buy_date=datetime(2026, 10, 1, 10, 0),
+                stop_loss=70.0, take_profit=130.0, status="holding",
+            ))
+            db.commit()
+
+            # 模拟当前处于交易时段，MU 现价 $75 -> 组合总市值 $75,000（较峰值 $100,000 回撤 25%）
+            monkeypatch.setattr(alert_mod, "is_market_open", lambda mkt, now=None: True)
+            monkeypatch.setattr(StockService, "get_realtime_quote", staticmethod(lambda code, mkt="US": {"price": 75.0}))
+            sent_payloads = []
+            monkeypatch.setattr(ReportService, "send_to_wechat", lambda self, msg: (sent_payloads.append(msg) or {"sent": True}))
+
+            out = alert_mod.run_price_monitor()
+            assert out["total_value"] == 75000.0
+            assert out["drawdown_alert"] is not None
+            assert out["drawdown_alert"]["sent"] is True
+            assert out["drawdown_alert"]["current_drawdown_pct"] == 25.0
+            assert any("组合回撤破线预警" in m for m in sent_payloads)
+
+            # 同日二次调用：回撤告警已去重
+            out_dup = alert_mod.run_price_monitor()
+            assert out_dup["drawdown_alert"]["already_sent"] is True
+        finally:
+            self._clean_db()
+            db.close()
 
 
 if __name__ == '__main__':

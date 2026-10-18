@@ -1,6 +1,6 @@
 import { Suspense, lazy } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import { ConfigProvider, Spin } from 'antd';
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import { ConfigProvider, Spin, Result, Button } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import MainLayout from './components/MainLayout';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -19,10 +19,10 @@ function App() {
       locale={zhCN}
       theme={{
         token: {
-          // 与 DESIGN.md/tokens.ts 对齐；colorLink 用更深的蓝保证正文链接对比度≥4.5:1
+          // 与 DESIGN.md/tokens.ts 对齐；统一从 colors.primary 取色保证白底/白字对比度≥4.5:1
           colorPrimary: colors.primary,
           colorInfo: colors.primary,
-          colorLink: '#0958d9',
+          colorLink: colors.primary,
         },
       }}
     >
@@ -42,6 +42,21 @@ function App() {
               <Route path="/portfolio" element={<Portfolio />} />
               <Route path="/backtest" element={<Backtest />} />
               <Route path="/ai-pick" element={<AIPick />} />
+              <Route
+                path="*"
+                element={
+                  <Result
+                    status="404"
+                    title="404"
+                    subTitle="抱歉，您访问的页面不存在"
+                    extra={
+                      <Link to="/">
+                        <Button type="primary">返回首页</Button>
+                      </Link>
+                    }
+                  />
+                }
+              />
               </Routes>
             </Suspense>
           </ErrorBoundary>

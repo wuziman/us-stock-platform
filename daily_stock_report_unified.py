@@ -705,7 +705,7 @@ def format_strategy_matrix(results: list, is_degraded: bool, regime: dict) -> st
         report.append(f"### {i}. {code} {name} {icon}{rec} (`{score:.1f}分`){badge_str}")
         if earnings_tag:
             report.append(f"- 📅 **财报雷达**: `{earnings_tag}`")
-        stat_line = f" | 实测: `{profile['stat']}`" if profile.get('stat') else ""
+        stat_line = f" | 实测[口径:BacktestService]: `{profile['stat']}`" if profile.get('stat') else ""
         report.append(f"- 现价 **${price:.2f}** (技`{res['tech_score']:.1f}` 新`{res['news_score']:.1f}` 宏`{res['macro_score']:.1f}`){stat_line}")
         report.append(f"- 💡 **线性**: 买入 **${linear['buy']:.2f}** (-{res['linear_distance']:.1f}%) | 止盈 ${linear['profit']:.2f} (+15%) | 止损 ${linear['stop']:.2f} (-8%)")
         report.append(f"- 🛡️ **非线性**: 买入 **${nonlinear['buy']:.2f}** (-{res['nonlinear_distance']:.1f}%) | 止盈 ${nonlinear['profit']:.2f} (+46%) | 止损 ${nonlinear['stop']:.2f} (-8%)")
@@ -814,13 +814,30 @@ def main():
             rec = "不建议买入"
             icon = "🔴"
 
-        # 大盘黑天鹅熔断与防守降级保护
+        # 大盘黑天鹅熔断与防守降级保护（点位真实联动：CAUTION买点下移2%/半仓，CIRCUIT_BREAKER冻结新开仓买点）
         if regime.get('status') == 'CIRCUIT_BREAKER':
             rec = "避险"
             icon = "🔴"
-        elif regime.get('status') == 'CAUTION' and "买入" in rec:
-            rec = "谨慎建仓"
-            icon = "🟡"
+            item['position_scale'] = 0.0
+            item['linear']['buy'] = None
+            item['linear']['buy_low'] = None
+            item['nonlinear']['buy'] = None
+            item['nonlinear']['buy_low'] = None
+        elif regime.get('status') == 'CAUTION':
+            item['position_scale'] = 0.5
+            for k in ('linear', 'nonlinear'):
+                if item[k].get('buy') is not None:
+                    shifted = round(item[k]['buy'] * 0.98, 2)
+                    item[k]['buy'] = shifted
+                    item[k]['buy_low'] = shifted
+                    item[k]['stop'] = round(shifted * 0.92, 2)
+            if "买入" in rec:
+                rec = "谨慎建仓"
+                icon = "🟡"
+        else:
+            item['position_scale'] = 1.0
+            item['linear']['buy_low'] = item['linear'].get('buy')
+            item['nonlinear']['buy_low'] = item['nonlinear'].get('buy')
 
         # 核心标的财报临近排雷保护
         if earnings_info.get('is_imminent'):

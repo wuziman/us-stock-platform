@@ -19,9 +19,10 @@ from .tech_score import calculate_tech_score
 from ..utils.indicators import calculate_all_indicators
 from ..utils.app_config import load_config
 from ..utils.price_levels import (
+    CAUTION_BUY_DISCOUNT,
     LINEAR_PROFIT_PCT,
     NONLINEAR_PROFIT_PCT,
-    atr_adaptive_levels,
+    apply_regime_to_levels,
     discipline_stop,
     linear_buy_point,
     macd_state_days,
@@ -56,17 +57,90 @@ NEGATIVE_EN = [
 ]
 
 
+# 否定前缀词与反转后缀短语（用于将“不看好”“未超预期”“高增长难以持续”“不及预期”等极性翻转）
+NEGATION_PREFIX_CN = (
+    "不", "未", "非", "无", "没", "没有", "不再", "并不", "并非", "难", "难以", "缺乏", "未见",
+)
+NEGATION_SUFFIX_CN = (
+    "难以持续", "难以为继", "不及预期", "未达预期", "低于预期", "受阻", "乏力", "放缓", "存疑", "落空",
+)
+NEGATIVE_COMPOUND_CN = (
+    "不及预期", "低于预期", "未达预期", "难以持续", "难以为继", "由盈转亏", "增收不增利",
+)
+NEGATION_PREFIX_EN_RE = re.compile(r"(?:\bnot\b|\bno\b|\bnever\b|\bfails?\s+to\b|\bunable\s+to\b)\s*$", re.I)
+
+
 def score_text_sentiment(text: str) -> int:
     """
-    对单条文本做关键词情感打分
+    对单条文本做关键词情感打分（支持否定前缀与反转后缀极性翻转）：
+    - 正向词前紧邻否定前缀（如“不看好”“未超预期”“不再增持”）或后接反转短语（如“增长难以持续”）→ 极性翻转为利空(-1)
+    - 负向词前紧邻否定/消除前缀（如“未亏损”“解除冻结”）→ 抵消负向极性
+    - 显式复合利空词（如“不及预期”“低于预期”“难以持续”）直接计入利空
 
     返回：1（利好）/ 0（中性）/ -1（利空）
     """
+    if not text:
+        return 0
     text_lower = text.lower()
-    pos = sum(1 for kw in POSITIVE_CN if kw in text) + \
-          sum(1 for kw in POSITIVE_EN if kw in text_lower)
-    neg = sum(1 for kw in NEGATIVE_CN if kw in text) + \
-          sum(1 for kw in NEGATIVE_EN if kw in text_lower)
+    pos = 0
+    neg = 0
+
+    clause_splitter = re.compile(r"[，。；！？,.;!?\n]")
+    clauses = clause_splitter.split(text)
+
+    for clause in clauses:
+        if not clause:
+            continue
+        matched_compound_neg = False
+        for comp in NEGATIVE_COMPOUND_CN:
+            if comp in clause:
+                neg += 1
+                matched_compound_neg = True
+
+        for kw in POSITIVE_CN:
+            start_pos = 0
+            while True:
+                idx = clause.find(kw, start_pos)
+                if idx == -1:
+                    break
+                prefix = clause[max(0, idx - 4):idx]
+                suffix = clause[idx + len(kw):min(len(clause), idx + len(kw) + 6)]
+                has_neg_prefix = any(prefix.endswith(p) or p in prefix for p in NEGATION_PREFIX_CN)
+                has_neg_suffix = any(s in suffix for s in NEGATION_SUFFIX_CN)
+                if has_neg_prefix:
+                    neg += 1
+                elif has_neg_suffix or matched_compound_neg:
+                    if not matched_compound_neg:
+                        neg += 1
+                else:
+                    pos += 1
+                start_pos = idx + len(kw)
+
+        for kw in NEGATIVE_CN:
+            start_pos = 0
+            while True:
+                idx = clause.find(kw, start_pos)
+                if idx == -1:
+                    break
+                prefix = clause[max(0, idx - 4):idx]
+                if any(p in prefix for p in ("未", "不", "无", "没", "解除", "消除")):
+                    pass
+                else:
+                    neg += 1
+                start_pos = idx + len(kw)
+
+    for kw in POSITIVE_EN:
+        for m in re.finditer(re.escape(kw), text_lower):
+            prefix_en = text_lower[max(0, m.start() - 15):m.start()]
+            if NEGATION_PREFIX_EN_RE.search(prefix_en):
+                neg += 1
+            else:
+                pos += 1
+
+    for kw in NEGATIVE_EN:
+        if kw in text_lower:
+            neg += 1
+
     if pos > neg:
         return 1
     if neg > pos:
@@ -84,6 +158,26 @@ def _load_api_keys() -> Dict[str, str]:
     keys['newsapi'] = keys['newsapi'] or api.get('newsapi', '')
     keys['fred'] = keys['fred'] or api.get('fred', '')
     return keys
+
+
+# ============================================
+# 四维评分宪法级权重常量（全仓库唯一真源，严禁在其他模块重复手写字面量）
+# ============================================
+DEFAULT_4D_WEIGHTS = {
+    "technical": 0.40,
+    "news": 0.30,
+    "macro": 0.15,
+    "event": 0.15,
+}
+DEFAULT_DIMENSION_WEIGHTS = {
+    "simple": DEFAULT_4D_WEIGHTS,
+    "research": {
+        "technical": 0.35,
+        "news": 0.15,
+        "macro": 0.25,
+        "event": 0.25,
+    },
+}
 
 
 class AnalysisService:
@@ -124,21 +218,14 @@ class AnalysisService:
             macro_score, macro_details = fut_macro.result()
             event_score, event_details = fut_event.result()
 
-        # 计算综合评分
-        if mode == "research":
-            total_score = (
-                tech_score * 0.35 +
-                news_score * 0.15 +
-                macro_score * 0.25 +
-                event_score * 0.25
-            )
-        else:
-            total_score = (
-                tech_score * 0.4 +
-                news_score * 0.3 +
-                macro_score * 0.15 +
-                event_score * 0.15
-            )
+        # 计算综合评分（直接读取模块级唯一真源常量 DEFAULT_DIMENSION_WEIGHTS，杜绝硬编码分叉）
+        w = DEFAULT_DIMENSION_WEIGHTS.get(mode, DEFAULT_4D_WEIGHTS)
+        total_score = (
+            tech_score * w["technical"] +
+            news_score * w["news"] +
+            macro_score * w["macro"] +
+            event_score * w["event"]
+        )
 
         # 确定推荐等级
         recommendation = self._get_recommendation(total_score)
@@ -480,16 +567,16 @@ class AnalysisService:
         return max(0, min(10, score)), details
 
     def _analyze_macro_cn(self) -> Tuple[float, Dict]:
-        """A股宏观与大盘环境评估：基于沪深核心基准走势与量能趋势"""
+        """A股宏观与大盘环境评估：基于沪深300指数（000300.SS）走势与量能趋势"""
         score = 5.5
         details: Dict[str, Any] = {
-            'indicators': {},
-            'interpretations': ['A股本土流动性与市场风险偏好评估'],
-            'sources': ['沪深市场基准']
+            'indicators': {'benchmark': '000300.SS'},
+            'interpretations': ['A股本土流动性与沪深300(000300.SS)大盘风险偏好评估'],
+            'sources': ['沪深300指数 (000300.SS)']
         }
         try:
-            # 拉取平安银行/招商银行或沪深代表性权重作为市场温度计参考
-            df_bench = self.stock_service.get_stock_data('000001', 'A', period='3mo')
+            # 拉取沪深300指数（000300.SS）作为A股大盘基准（替代旧版单股 000001.SZ）
+            df_bench = self.stock_service.get_stock_data('000300.SS', 'A', period='3mo')
             if df_bench is not None and len(df_bench) >= 20:
                 close = df_bench['Close']
                 cur = float(close.iloc[-1])
@@ -498,10 +585,10 @@ class AnalysisService:
                 details['indicators']['market_20d_chg'] = round(ret20, 2)
                 if cur > ma20:
                     score += 1.0
-                    details['interpretations'].append(f"A股蓝筹基准站上20日均线(近20日{ret20:+.1f}%)，多头情绪回暖")
+                    details['interpretations'].append(f"沪深300基准(000300.SS)站上20日均线(近20日{ret20:+.1f}%)，多头情绪回暖")
                 else:
                     score -= 0.5
-                    details['interpretations'].append(f"A股蓝筹基准处于20日均线下方(近20日{ret20:+.1f}%)，建议控制仓位")
+                    details['interpretations'].append(f"沪深300基准(000300.SS)处于20日均线下方(近20日{ret20:+.1f}%)，建议控制仓位")
         except Exception:
             pass
         return max(0.0, min(10.0, score)), details
@@ -630,20 +717,45 @@ class AnalysisService:
             linear_buy = linear_buy_point(current_price, ma20)
             nonlinear_buy = nonlinear_buy_point(rsi, ma20, bb_lower)
 
-            # MACD策略：信号状态 + 操作参考（信号型策略，无固定止盈位）
+            # 读取全局 regime_linkage_enabled 开关与当前大盘风控状态（统管日报/分析/建仓三处）
+            from .alert_service import is_regime_linkage_enabled
+            from .report_service import ReportService
+            linkage_on = is_regime_linkage_enabled()
+            regime = ReportService().get_market_regime()
+            raw_status = (regime.get('status') or 'NORMAL').upper()
+            eff_status = raw_status if linkage_on else 'NORMAL'
+
+            linear_levels = apply_regime_to_levels(
+                current_price, linear_buy, LINEAR_PROFIT_PCT,
+                regime_status=eff_status, atr=atr_val,
+                stop_atr_mult=2.0, profit_atr_mult=3.5,
+            )
+            nonlinear_levels = apply_regime_to_levels(
+                current_price, nonlinear_buy, NONLINEAR_PROFIT_PCT,
+                regime_status=eff_status, atr=atr_val,
+                stop_atr_mult=2.2, profit_atr_mult=6.5,
+            )
+
+            # MACD策略：信号状态 + 操作参考（受熔断/预警联动控制）
             macd_info = self._calculate_macd_levels(df, latest)
+            if eff_status == 'CIRCUIT_BREAKER':
+                macd_info['add_price'] = None
+                macd_info['watch_price'] = None
+            elif eff_status == 'CAUTION':
+                if macd_info.get('add_price') is not None:
+                    macd_info['add_price'] = round(macd_info['add_price'] * CAUTION_BUY_DISCOUNT, 2)
+                if macd_info.get('watch_price') is not None:
+                    macd_info['watch_price'] = round(macd_info['watch_price'] * CAUTION_BUY_DISCOUNT, 2)
 
             return {
                 'current_price': round(current_price, 2),
                 'atr': round(atr_val, 2) if atr_val else None,
-                'linear': atr_adaptive_levels(
-                    current_price, linear_buy, LINEAR_PROFIT_PCT, atr=atr_val,
-                    stop_atr_mult=2.0, profit_atr_mult=3.5
-                ),
-                'nonlinear': atr_adaptive_levels(
-                    current_price, nonlinear_buy, NONLINEAR_PROFIT_PCT, atr=atr_val,
-                    stop_atr_mult=2.2, profit_atr_mult=6.5
-                ),
+                'regime_status': eff_status,
+                'raw_regime_status': raw_status,
+                'regime_linkage_enabled': linkage_on,
+                'position_scale': linear_levels.get('position_scale', 1.0),
+                'linear': linear_levels,
+                'nonlinear': nonlinear_levels,
                 'macd': macd_info
             }
         except Exception:

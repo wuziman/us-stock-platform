@@ -2,9 +2,9 @@
 Pydantic模型
 """
 
-from datetime import date, datetime
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, ConfigDict
+from datetime import datetime
+from typing import Optional, List, Dict, Any, Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # 自选股
@@ -28,7 +28,7 @@ class WatchlistResponse(BaseModel):
 class AnalysisRequest(BaseModel):
     stock_code: str
     stock_name: str
-    mode: str = "simple"  # simple or research
+    mode: Literal["simple", "research"] = "simple"
 
 
 class EarningsRadar(BaseModel):
@@ -62,26 +62,48 @@ class PositionCreate(BaseModel):
     stock_name: str
     # 市场判定以后端 detect_market 为准，此字段仅为兼容旧客户端保留
     market: str = "US"
-    buy_price: float
-    quantity: int
+    buy_price: float = Field(..., gt=0)
+    quantity: int = Field(..., ge=1)
     buy_date: datetime
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
+    stop_loss: Optional[float] = Field(None, gt=0)
+    take_profit: Optional[float] = Field(None, gt=0)
+
+
+class PositionAddTrancheRequest(BaseModel):
+    """
+    原行阶梯补仓请求：
+    - 严格在原 holding 持仓行原地更新，不新建持仓行
+    - 跌幅阈值（第1档-5%、第2档-10%、第3档-15%）永久锚定首次建仓价 initial_price
+    - 补仓后默认按新加权均价×0.92重算纪律止损（原仓位绝对止损线随新均价同步下移）
+    """
+    add_price: float = Field(..., gt=0)
+    add_quantity: int = Field(..., ge=1)
+    stop_loss: Optional[float] = Field(None, gt=0)
+    strategy_type: Literal["linear", "nonlinear"] = "linear"
+    force: bool = False  # True=允许未达档位跌幅时手动强制补仓（仍受最多3次硬上限约束）
+
+
+class RiskSwitchesUpdate(BaseModel):
+    """实盘风控增强四开关更新请求（默认全部开启 Default Risk-Control On）"""
+    sizing_mode: Optional[Literal["half_kelly_combined", "fixed_2pct"]] = None
+    trailing_stop_enabled: Optional[bool] = None
+    staged_add_enabled: Optional[bool] = None
+    regime_linkage_enabled: Optional[bool] = None
 
 
 class PositionSell(BaseModel):
     """卖出持仓"""
-    sell_price: float
+    sell_price: float = Field(..., gt=0)
     sell_date: datetime
 
 
 class PositionUpdate(BaseModel):
-    """修改持仓：买入价/数量/买入日期/止损止盈（None=不修改）"""
-    buy_price: Optional[float] = None
-    quantity: Optional[int] = None
-    buy_date: Optional[date] = None
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
+    """修改持仓：买入价/数量/买入日期/止损止盈（None=不修改；buy_date与ORM列同为datetime）"""
+    buy_price: Optional[float] = Field(None, gt=0)
+    quantity: Optional[int] = Field(None, ge=1)
+    buy_date: Optional[datetime] = None
+    stop_loss: Optional[float] = Field(None, gt=0)
+    take_profit: Optional[float] = Field(None, gt=0)
 
 
 class PositionResponse(BaseModel):
@@ -90,10 +112,16 @@ class PositionResponse(BaseModel):
     stock_name: str
     market: str
     buy_price: float
+    initial_price: Optional[float] = None
+    add_count: int = 0
+    highest_price: Optional[float] = None
     quantity: int
     buy_date: datetime
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    trailing_stop_price: Optional[float] = None
+    effective_stop_loss: Optional[float] = None
+    add_position_signal: Optional[Dict[str, Any]] = None
     status: str = "holding"
     sell_price: Optional[float] = None
     sell_date: Optional[datetime] = None
@@ -116,11 +144,11 @@ class BacktestRequest(BaseModel):
     period: str = "1y"  # 1y, 3y, 5y
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    initial_capital: float = 100000
-    commission_per_trade: float = 1.0  # 每笔交易手续费（美元）
+    initial_capital: float = Field(100000, gt=0)
+    commission_per_trade: float = Field(1.0, ge=0)  # 每笔交易手续费（美元，禁止负数刷收益）
     trailing_stop: bool = False        # 是否启用移动止盈与浮盈+10%保本损
     staged_entry: bool = False         # 是否启用分批金字塔建仓（首仓50%+回撤5%补仓50%）
-    params: Optional[Dict[str, float]] = None  # 可选策略自定义参数（如寻优得到的最优tp/sl或fast/slow）
+    params: Optional[Dict[str, float]] = None  # 可选策略自定义参数
 
 
 class BacktestResponse(BaseModel):
@@ -147,8 +175,8 @@ class BacktestCompareRequest(BaseModel):
     """一键对比4策略请求"""
     stock_code: str
     period: str = "1y"
-    initial_capital: float = 100000
-    commission_per_trade: float = 1.0
+    initial_capital: float = Field(100000, gt=0)
+    commission_per_trade: float = Field(1.0, ge=0)
     trailing_stop: bool = False
     staged_entry: bool = False
 
@@ -158,8 +186,8 @@ class OptimizeRequest(BaseModel):
     stock_code: str
     strategy: str  # linear, nonlinear, ma_cross, macd
     period: str = "1y"
-    initial_capital: float = 100000
-    commission_per_trade: float = 1.0
+    initial_capital: float = Field(100000, gt=0)
+    commission_per_trade: float = Field(1.0, ge=0)
     metric: str = "sharpe"  # 排序指标: sharpe/total_return/annual_return/max_drawdown/win_rate/trade_count
     param_grid: Optional[Dict[str, List[float]]] = None  # 覆盖内置网格的部分取值
 
@@ -169,7 +197,7 @@ class WalkForwardRequest(BaseModel):
     stock_code: str
     strategy: str
     period: str = "5y"
-    initial_capital: float = 100000
-    commission_per_trade: float = 1.0
-    train_ratio: float = 0.6  # 训练窗占测试块之前历史的比例（0.1~1.0）
-    segments: int = 2  # 切分段数（服务端限1~4防超时）
+    initial_capital: float = Field(100000, gt=0)
+    commission_per_trade: float = Field(1.0, ge=0)
+    train_ratio: float = Field(0.6, ge=0.1, le=1.0)  # 训练窗占测试块之前历史的比例（0.1~1.0）
+    segments: int = Field(2, ge=1, le=4)  # 切分段数（服务端限1~4防超时）

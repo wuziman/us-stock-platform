@@ -1,22 +1,27 @@
 """
 股票数据服务
-支持A股（腾讯/东财前复权日K，新浪不复权兜底）和美股（YFinance）
+支持A股（腾讯/东财前复权日K，新浪不复权兜底，兼容 000300.SS 沪深300指数后缀）和美股（YFinance）
 """
 
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from pathlib import Path
 import yfinance as yf
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from datetime import timedelta
+from typing import Optional, List, Dict, Tuple
 
 from ..database import SessionLocal
 from ..models_platform import KlineCache
+from ..utils.timezone import now_beijing
 
 
 # K线缓存有效期（分钟）
 CACHE_TTL_MINUTES = 30
+# stock.info 单次拉取最大超时秒数（超时自动降级 fast_info / K线缓存，不断链）
+STOCK_INFO_TIMEOUT_SECONDS = 3.0
 
 
 # 美股/ETF扩展列表
@@ -72,8 +77,9 @@ US_STOCKS = {
 }
 
 
-# 常用A股列表（用于搜索）
+# 常用A股与指数列表（用于搜索）
 CN_STOCKS = {
+    '000300.SS': '沪深300',
     '600519': '贵州茅台', '000858': '五粮液', '000333': '美的集团',
     '601318': '中国平安', '600036': '招商银行', '000001': '平安银行',
     '600276': '恒瑞医药', '002594': '比亚迪', '600111': '北方稀土',
@@ -85,6 +91,26 @@ CN_STOCKS = {
     '002415': '海康威视', '600809': '山西汾酒', '300015': '爱尔眼科',
     '000538': '云南白药', '603259': '药明康德', '002304': '洋河股份',
 }
+
+
+def _resolve_cn_symbol(stock_code: str) -> Tuple[str, str, str]:
+    """
+    解析A股/指数代码，返回 (6位纯数字code, 腾讯/新浪前缀 'sh'|'sz', 东财secid '1.xxxxxx'|'0.xxxxxx')。
+    兼容 .SS / .SH / .SZ 后缀以及 000300.SS（沪深300指数，上交所指数以000开头但市场为sh/1.）。
+    """
+    upper = stock_code.strip().upper()
+    explicit_sh = upper.endswith('.SS') or upper.endswith('.SH')
+    explicit_sz = upper.endswith('.SZ')
+    code = re.sub(r'\.(SS|SH|SZ)$', '', upper)
+    if explicit_sh:
+        is_sh = True
+    elif explicit_sz:
+        is_sh = False
+    else:
+        is_sh = code.startswith('6') or code == '000300'
+    prefix = 'sh' if is_sh else 'sz'
+    secid = f"{'1' if is_sh else '0'}.{code}"
+    return code, prefix, secid
 
 
 def _get_cn_session():
@@ -121,7 +147,7 @@ def _df_from_records(records) -> pd.DataFrame:
     return df.set_index(idx_col)
 
 
-def _read_kline_cache(cache_key: str):
+def _read_kline_cache(cache_key: str, ignore_ttl: bool = False):
     """读缓存：命中且未过期返回记录列表；未命中/过期/出错一律返回None（降级直连）"""
     try:
         db = SessionLocal()
@@ -129,7 +155,7 @@ def _read_kline_cache(cache_key: str):
             row = db.query(KlineCache).filter(KlineCache.cache_key == cache_key).first()
             if row is None or not row.fetched_at:
                 return None
-            if datetime.now() - row.fetched_at >= timedelta(minutes=CACHE_TTL_MINUTES):
+            if not ignore_ttl and (now_beijing() - row.fetched_at >= timedelta(minutes=CACHE_TTL_MINUTES)):
                 return None
             return json.loads(row.data_json)
         finally:
@@ -148,10 +174,10 @@ def _write_kline_cache(cache_key: str, df: pd.DataFrame):
             row = db.query(KlineCache).filter(KlineCache.cache_key == cache_key).first()
             if row:
                 row.data_json = data_json
-                row.fetched_at = datetime.now()
+                row.fetched_at = now_beijing()
             else:
                 db.add(KlineCache(cache_key=cache_key, data_json=data_json,
-                                  fetched_at=datetime.now()))
+                                  fetched_at=now_beijing()))
             db.commit()
         finally:
             db.close()
@@ -172,7 +198,7 @@ def clear_kline_cache() -> int:
 
 def cleanup_expired_kline_cache(max_age_hours: int = 24) -> int:
     """自动清理超过 max_age_hours 小时的陈旧K线缓存记录，控制SQLite体积膨胀"""
-    cutoff = datetime.now() - timedelta(hours=max_age_hours)
+    cutoff = now_beijing() - timedelta(hours=max_age_hours)
     db = SessionLocal()
     try:
         rows = db.query(KlineCache).all()
@@ -191,21 +217,18 @@ def cleanup_expired_kline_cache(max_age_hours: int = 24) -> int:
         db.close()
 
 
-def _fetch_kline_eastmoney(code: str, period: str) -> Optional[pd.DataFrame]:
-    """东方财富前复权日K（免费公开接口）：数字镜像子域直连（push2his主域被
-    本机Clash代理拦截直连必断），镜像不可用时回退系统代理。
-    任一步失败返回None，由调用方决定降级路径"""
+def _fetch_kline_eastmoney(code: str, period: str, secid: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """东方财富前复权日K（免费公开接口）"""
     try:
-        # secid 前缀：沪市(6开头)=1，其余=0（深市）；fqt=1 前复权
-        secid = ('1.' if code.startswith('6') else '0.') + code
+        if not secid:
+            _, _, secid = _resolve_cn_symbol(code)
 
-        # period 映射为起始日期（东财接口按 beg/end 区间取数）
         period_days = {
             '1mo': 40, '3mo': 100, '6mo': 200,
             '1y': 380, '2y': 760, '3y': 1140, '5y': 1900, 'max': 7500
         }
         days = period_days.get(period, 100)
-        beg = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+        beg = (now_beijing() - timedelta(days=days)).strftime('%Y%m%d')
 
         url = "https://92.push2his.eastmoney.com/api/qt/stock/kline/get"
         params = {
@@ -222,7 +245,6 @@ def _fetch_kline_eastmoney(code: str, period: str) -> Optional[pd.DataFrame]:
         try:
             response = _get_cn_session().get(url, params=params, timeout=10)
         except requests.RequestException:
-            # 直连被限流/断开时，回退走系统默认路由（代理出口通常可达东财）
             print(f"东财直连失败，尝试系统代理: {code}")
             fallback = requests.Session()
             fallback.trust_env = True
@@ -254,13 +276,13 @@ def _fetch_kline_eastmoney(code: str, period: str) -> Optional[pd.DataFrame]:
         return None
 
 
-def _fetch_kline_sina(code: str, period: str) -> Optional[pd.DataFrame]:
+def _fetch_kline_sina(code: str, period: str, prefix: Optional[str] = None) -> Optional[pd.DataFrame]:
     """新浪日K（不复权）——仅作东财不可用时的降级来源"""
     try:
-        prefix = 'sh' if code.startswith('6') else 'sz'
-        symbol = f"{prefix}{code}"
+        clean_code, resolved_prefix, _ = _resolve_cn_symbol(code)
+        prefix = prefix or resolved_prefix
+        symbol = f"{prefix}{clean_code}"
 
-        # 按period映射天数（新浪接口最长1023天≈4年）
         period_days = {
             '1mo': 30, '3mo': 90, '6mo': 185,
             '1y': 370, '2y': 740, '3y': 1023, '5y': 1023, 'max': 1023
@@ -299,14 +321,13 @@ def _fetch_kline_sina(code: str, period: str) -> Optional[pd.DataFrame]:
         return None
 
 
-def _fetch_kline_tencent(code: str, period: str) -> Optional[pd.DataFrame]:
-    """腾讯前复权日K（web.ifzq.gtimg.cn公开接口，无需key；单次最多约800根，
-    5y/max封顶）。东财WAF对本机python客户端间歇性重置连接，故以腾讯为主源"""
+def _fetch_kline_tencent(code: str, period: str, prefix: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """腾讯前复权日K"""
     try:
-        prefix = 'sh' if code.startswith('6') else 'sz'
-        symbol = f"{prefix}{code}"
+        clean_code, resolved_prefix, _ = _resolve_cn_symbol(code)
+        prefix = prefix or resolved_prefix
+        symbol = f"{prefix}{clean_code}"
 
-        # 按period映射根数（A股年交易日约243；接口单次上限约800根）
         period_bars = {
             '1mo': 30, '3mo': 70, '6mo': 135,
             '1y': 260, '2y': 510, '3y': 760, '5y': 800, 'max': 800
@@ -342,30 +363,55 @@ def _fetch_kline_tencent(code: str, period: str) -> Optional[pd.DataFrame]:
 
 
 def _fetch_kline(stock_code: str, market: str, period: str) -> Optional[pd.DataFrame]:
-    """真实拉取K线数据：美股走yfinance；A股主路为腾讯前复权日K、东财前复权备选
-    （除权除息缺口不再被当成真实涨跌参与指标与回测），均不可用时降级新浪不复权"""
+    """真实拉取K线数据：美股走yfinance；A股主路为腾讯前复权日K、东财前复权备选，均不可用时降级新浪不复权"""
     try:
         if market == "US":
-            stock = yf.Ticker(stock_code)
-            df = stock.history(period=period)
-            if not df.empty:
-                df.index = pd.to_datetime(df.index).tz_localize(None)
-                return df
+            try:
+                stock = yf.Ticker(stock_code)
+                df = stock.history(period=period)
+                if df is not None and not df.empty:
+                    df.index = pd.to_datetime(df.index).tz_localize(None)
+                    return df
+            except Exception as yf_err:
+                print(f"yfinance拉取{stock_code}失败，尝试降级缓存/离线日线: {yf_err}")
+            # 降级 1：过期SQLite缓存兜底
+            stale_records = _read_kline_cache(_cache_key("US", stock_code, period), ignore_ttl=True)
+            if stale_records:
+                try:
+                    return _df_from_records(stale_records)
+                except Exception:
+                    pass
+            # 降级 2：本地离线 Excel 数据兜底（data/{code}_data.xlsx 或 */{code}_data.xlsx）
+            try:
+                root_dir = Path(__file__).resolve().parents[4]
+                candidates = list(root_dir.glob(f"*/{stock_code.upper()}_data.xlsx")) + [
+                    root_dir / "data" / f"{stock_code.upper()}_data.xlsx"
+                ]
+                for xlsx_path in candidates:
+                    if xlsx_path.exists():
+                        df_local = pd.read_excel(xlsx_path, index_col=0, parse_dates=True)
+                        if not df_local.empty:
+                            df_local.index = pd.to_datetime(df_local.index).tz_localize(None)
+                            return df_local
+            except Exception:
+                pass
 
         elif market == "A":
-            code = stock_code.replace('.SH', '').replace('.SZ', '')
+            code, prefix, secid = _resolve_cn_symbol(stock_code)
 
             if len(code) != 6 or not code.isdigit():
                 print(f"无效的A股代码格式: {stock_code}")
                 return None
 
-            # 主源腾讯前复权；东财前复权备选（其WAF间歇性拦截python客户端）；新浪不复权兜底
-            for fetcher in (_fetch_kline_tencent, _fetch_kline_eastmoney):
-                df = fetcher(code, period)
-                if df is not None and not df.empty:
-                    return df
+            # 主源腾讯前复权；东财前复权备选；新浪不复权兜底
+            df = _fetch_kline_tencent(code, period, prefix=prefix)
+            if df is not None and not df.empty:
+                return df
+            df = _fetch_kline_eastmoney(code, period, secid=secid)
+            if df is not None and not df.empty:
+                return df
             print(f"警告: {stock_code} 前复权源均失败，降级新浪不复权数据")
-            return _fetch_kline_sina(code, period)
+            return _fetch_kline_sina(code, period, prefix=prefix)
 
         return None
     except Exception as e:
@@ -411,22 +457,74 @@ class StockService:
         try:
             if market == "US":
                 stock = yf.Ticker(stock_code)
-                info = stock.info
+                info = {}
+                timed_out = False
+                # 使用受控超时拉取 stock.info，防止 Yahoo 远端卡死阻塞线程
+                ex = ThreadPoolExecutor(max_workers=1)
+                fut = ex.submit(lambda: stock.info or {})
+                try:
+                    info = fut.result(timeout=STOCK_INFO_TIMEOUT_SECONDS) or {}
+                except (FuturesTimeoutError, Exception) as info_err:
+                    timed_out = True
+                    print(f"stock.info 超时或异常({stock_code})，切换 fast_info/K线降级: {info_err}")
+                finally:
+                    ex.shutdown(wait=False, cancel_futures=True)
+
+                price = info.get('currentPrice') or info.get('regularMarketPrice') or 0
+                change = info.get('regularMarketChange') or 0
+                change_pct = info.get('regularMarketChangePercent') or 0
+                volume = info.get('volume') or 0
+                market_cap = info.get('marketCap') or 0
+
+                # 若 stock.info 超时或未拿到有效价格，尝试 fast_info
+                if (timed_out or not price or price <= 0):
+                    try:
+                        fi = getattr(stock, 'fast_info', None)
+                        if fi is not None:
+                            fi_get = fi.get if hasattr(fi, 'get') else lambda k, d=None: getattr(fi, k, d)
+                            last_px = fi_get('lastPrice') or fi_get('last_price') or 0
+                            prev_px = fi_get('previousClose') or fi_get('previous_close') or 0
+                            if last_px and float(last_px) > 0:
+                                price = round(float(last_px), 2)
+                                if prev_px and float(prev_px) > 0:
+                                    change = round(price - float(prev_px), 3)
+                                    change_pct = round((price / float(prev_px) - 1.0) * 100.0, 3)
+                            volume = volume or int(fi_get('lastVolume') or fi_get('last_volume') or 0)
+                            market_cap = market_cap or int(fi_get('marketCap') or fi_get('market_cap') or 0)
+                    except Exception:
+                        pass
+
+                # 若仍未拿到有效价格，降级使用最近日K收盘价兜底（确保主源超时不断链）
+                if not price or float(price) <= 0:
+                    df_fb = StockService.get_stock_data(stock_code, "US", period="1mo", use_cache=True)
+                    if df_fb is not None and not df_fb.empty and "Close" in df_fb.columns:
+                        price = round(float(df_fb["Close"].iloc[-1]), 2)
+                        if len(df_fb) >= 2:
+                            prev_c = float(df_fb["Close"].iloc[-2])
+                            if prev_c > 0:
+                                change = round(price - prev_c, 3)
+                                change_pct = round((price / prev_c - 1.0) * 100.0, 3)
+                        if "Volume" in df_fb.columns:
+                            volume = int(float(df_fb["Volume"].iloc[-1]))
+
+                if not price or float(price) <= 0:
+                    return None
+
                 return {
                     'code': stock_code,
                     'name': info.get('shortName', US_STOCKS.get(stock_code, stock_code)),
-                    'price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
-                    'change': info.get('regularMarketChange', 0),
-                    'change_pct': info.get('regularMarketChangePercent', 0),
-                    'volume': info.get('volume', 0),
-                    'market_cap': info.get('marketCap', 0),
+                    'price': price,
+                    'change': change,
+                    'change_pct': change_pct,
+                    'volume': volume,
+                    'market_cap': market_cap,
                     'pe_ratio': info.get('trailingPE', None),
-                    'pb_ratio': info.get('priceToBook', None)
+                    'pb_ratio': info.get('priceToBook', None),
+                    'degraded': timed_out,
                 }
 
             elif market == "A":
-                code = stock_code.replace('.SH', '').replace('.SZ', '')
-                prefix = 'sh' if code.startswith('6') else 'sz'
+                code, prefix, _ = _resolve_cn_symbol(stock_code)
                 symbol = f"{prefix}{code}"
 
                 # 使用新浪财经实时接口
@@ -437,18 +535,14 @@ class StockService:
                 })
                 response = session.get(url, timeout=10)
 
-                # 解析返回数据
                 content = response.text
                 match = re.search(r'"(.+)"', content)
                 if match:
                     fields = match.group(1).split(',')
                     if len(fields) >= 32:
-                        # 下标：0名称/1今开/2昨收/3现价；涨跌无现成字段，用现价-昨收自算
                         price = float(fields[3]) if fields[3] else 0
                         prev_close = float(fields[2]) if fields[2] else 0
                         if price <= 0:
-                            # 停牌/集合竞价时段新浪把现价置0.000而非空串，
-                            # 按无效处理返回None，让持仓端回退买入价而不是显示-100%
                             return None
                         return {
                             'code': stock_code,
@@ -500,11 +594,11 @@ class StockService:
                 if cn_results:
                     results.extend(cn_results)
                 else:
-                    # 兜底：本地热门列表
                     query_lower = query.lower()
                     for code, name in CN_STOCKS.items():
                         if query in name or query_lower in code.lower():
-                            market_type = 'SH' if code.startswith('6') else 'SZ'
+                            _, prefix, _ = _resolve_cn_symbol(code)
+                            market_type = 'SH' if prefix == 'sh' else 'SZ'
                             results.append({
                                 'code': code,
                                 'name': name,
@@ -521,7 +615,6 @@ class StockService:
     def _search_cn_suggest(query: str) -> List[Dict]:
         """
         新浪suggest接口实时搜索A股全市场
-        返回格式：var suggest="名称,类型11(沪深A),代码,szXXXXXX,..,;..."
         """
         items: List[Dict] = []
         try:
@@ -537,16 +630,13 @@ class StockService:
             if start == -1 or end <= start:
                 return items
 
-            # 每条记录以";"分隔，字段以","分隔：[0]名称 [1]类型 [2]代码 [3]带前缀全码
             for entry in text[start + 1:end].split(';'):
                 fields = entry.split(',')
                 if len(fields) < 4:
                     continue
                 name, type_code, code, full_code = fields[0], fields[1], fields[2], fields[3]
-                # 类型11=沪深A股；只收6位纯数字代码
                 if type_code != '11' or len(code) != 6 or not code.isdigit():
                     continue
-                # 纯数字查询时name可能是"szXXXXXX"形式，规范化为空让前端只显示代码
                 if name.lower().replace('.', '') == full_code.lower().replace('.', ''):
                     name = ''
                 items.append({

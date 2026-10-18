@@ -43,6 +43,19 @@ class TestSentiment:
         # 一好一坏 → 平局中性
         assert score_text_sentiment('增长超预期但裁员警告') == 0
 
+    def test_negation_flip_chinese_and_english(self):
+        """[第三段-8 验证] 否定词翻转极性（修改前误判为+1/0，修改后翻转为-1）"""
+        # 1. “不看好”：含正向词“看好”，旧版误判 +1，新版受否定前缀“不”翻转为 -1
+        assert score_text_sentiment('机构普遍不看好后市表现') == -1
+        # 2. “不及预期” / “未超预期”：旧版 0 / +1，新版翻转为 -1
+        assert score_text_sentiment('公司三季报营收不及预期') == -1
+        assert score_text_sentiment('四季度指引未超预期') == -1
+        # 3. “难以持续”：含正向词“增长”/“回暖”，旧版误判 +1，新版受反转后缀“难以持续”翻转为 -1
+        assert score_text_sentiment('高增长难以持续') == -1
+        assert score_text_sentiment('短期盈利回暖难以持续') == -1
+        # 4. 英文否定前缀翻转
+        assert score_text_sentiment('Company fails to beat revenue estimates') == -1
+
 
 # ============================================
 # 新浪A股新闻页解析（离线fixture，不依赖网络）
@@ -261,3 +274,218 @@ class TestApiKeys:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+# ============================================
+# [第三批·第三段-6/7/8] stock.info 超时不断链 + A股/美股三级降级源 + 清理项验证
+# ============================================
+class TestStockInfoTimeoutAndFallbackChains:
+    def test_stock_info_timeout_falls_back_without_breaking_chain(self, monkeypatch):
+        """
+        [第三批·第三段-6 验证]
+        当 yf.Ticker(code).info 发生阻塞超时或抛异常时，StockService.get_realtime_quote
+        在受控超时内自动切换 fast_info / K线缓存兜底，绝不挂死或断链返回 None。
+        """
+        import time
+        import app.services.stock_service as ss
+        from app.services.stock_service import StockService
+
+        monkeypatch.setattr(ss, "STOCK_INFO_TIMEOUT_SECONDS", 0.15)
+
+        class _HangingTicker:
+            def __init__(self, code):
+                self.code = code
+                self.fast_info = {"lastPrice": 138.5, "previousClose": 135.0, "lastVolume": 2500000}
+
+            @property
+            def info(self):
+                time.sleep(1.0)  # 故意超过 0.15s 超时阈值
+                return {"currentPrice": 999.0}
+
+        monkeypatch.setattr(ss.yf, "Ticker", _HangingTicker)
+        t0 = time.time()
+        quote = StockService.get_realtime_quote("MU", market="US")
+        elapsed = time.time() - t0
+
+        assert quote is not None, "stock.info 超时时必须通过 fast_info/K线缓存兜底，不能断链返回 None"
+        assert quote["code"] == "MU"
+        assert quote["price"] == 138.5
+        assert quote["degraded"] is True
+        assert elapsed < 0.8, f"超时控制未生效，耗时 {elapsed:.2f}s"
+
+    def test_cn_and_us_kline_fallback_chains(self, monkeypatch):
+        """
+        [第三批·第三段-7 验证]
+        1. A 股三级降级链：腾讯主源失败 -> 自动切换东财前复权成功；腾讯+东财均失败 -> 自动切换新浪兜底成功
+        2. 美股降级链：yfinance 主源失败 -> 自动降级本地离线缓存/Excel 数据成功
+        """
+        import app.services.stock_service as ss
+        from app.services.stock_service import StockService
+
+        fake_em_df = pd.DataFrame(
+            {"Open": [1500.0], "Close": [1520.0], "High": [1530.0], "Low": [1495.0], "Volume": [10000]},
+            index=pd.to_datetime(["2026-10-16"]),
+        )
+        fake_sina_df = pd.DataFrame(
+            {"Open": [1505.0], "Close": [1518.0], "High": [1525.0], "Low": [1500.0], "Volume": [12000]},
+            index=pd.to_datetime(["2026-10-16"]),
+        )
+
+        # Case 1: 腾讯失败 -> 东财接管
+        calls = []
+        monkeypatch.setattr(ss, "_fetch_kline_tencent", lambda code, period, prefix=None: (calls.append("tencent"), None)[1])
+        monkeypatch.setattr(ss, "_fetch_kline_eastmoney", lambda code, period, secid=None: (calls.append("eastmoney"), fake_em_df)[1])
+        monkeypatch.setattr(ss, "_fetch_kline_sina", lambda code, period, prefix=None: (calls.append("sina"), fake_sina_df)[1])
+
+        df1 = ss._fetch_kline("600519", "A", "1mo")
+        assert df1 is not None and not df1.empty
+        assert float(df1["Close"].iloc[-1]) == 1520.0
+        assert calls == ["tencent", "eastmoney"]
+
+        # Case 2: 腾讯 + 东财均失败 -> 新浪接管
+        calls.clear()
+        monkeypatch.setattr(ss, "_fetch_kline_eastmoney", lambda code, period, secid=None: (calls.append("eastmoney"), None)[1])
+        df2 = ss._fetch_kline("600519", "A", "1mo")
+        assert df2 is not None and not df2.empty
+        assert float(df2["Close"].iloc[-1]) == 1518.0
+        assert calls == ["tencent", "eastmoney", "sina"]
+
+        # Case 3: 美股 yfinance 抛错 -> 自动降级本地 data/MU_data.xlsx 兜底
+        class _BrokenUsTicker:
+            def __init__(self, code):
+                pass
+            def history(self, period="1mo"):
+                raise RuntimeError("Yahoo Finance 429 Too Many Requests")
+
+        monkeypatch.setattr(ss.yf, "Ticker", _BrokenUsTicker)
+        df_us = StockService.get_stock_data("MU", market="US", period="1mo", use_cache=False)
+        assert df_us is not None and not df_us.empty, "美股 yfinance 失败后应自动降级缓存或本地 Excel 数据"
+
+    def test_cleanup_items_verified(self):
+        """
+        [第三批·第三段-8 验证]
+        1. 根目录 utils/indicators.py 已收敛转发至 backend app/utils/indicators.py，原版已归档至 archive/
+        2. .dockerignore 包含 *.db
+        3. 前端 App.tsx 含 path="*" 404 路由，Backtest.tsx 含 commission_per_trade 表单项
+        """
+        from pathlib import Path
+        import utils.indicators as root_ind
+        from app.utils import indicators as backend_ind
+
+        repo_root = Path(__file__).resolve().parents[3]
+        assert (repo_root / "archive" / "utils_indicators_v1_archived.py").exists()
+        assert (repo_root / "archive" / "tech_stock_screener_v1_archived.py").exists()
+        assert (repo_root / "archive" / "verify_nonlinear_winrate_v1_archived.py").exists()
+        assert (repo_root / "archive" / "README.md").exists()
+
+        # 验证根 indicators 与 backend indicators 计算结果完全同源一致
+        s = pd.Series([100.0, 102.0, 101.0, 104.0, 106.0, 105.0, 108.0, 110.0] * 3)
+        assert root_ind.calculate_rsi(s).equals(backend_ind.calculate_rsi(s))
+
+        dockerignore = (repo_root / "stock-platform" / ".dockerignore").read_text(encoding="utf-8")
+        assert "*.db" in dockerignore
+
+        app_tsx = (repo_root / "stock-platform" / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+        assert 'path="*"' in app_tsx
+
+        bt_tsx = (repo_root / "stock-platform" / "frontend" / "src" / "pages" / "Backtest.tsx").read_text(encoding="utf-8")
+        assert 'name="commission_per_trade"' in bt_tsx
+
+
+class TestBatch4Segment1Guards:
+    def test_get_history_volume_nan_guard_no_500(self, monkeypatch):
+        """
+        [第四批·第一段-2 验证]
+        构造 Volume 含 NaN 的日线 DataFrame，调用 routers/stocks.py::get_history，
+        断言接口不抛 ValueError/500，且 NaN 行的 volume 字段返回 None。
+        """
+        import numpy as np
+        from app.routers import stocks as stocks_router
+
+        idx = pd.date_range("2026-09-01", periods=25, freq="B")
+        df_nan_vol = pd.DataFrame(
+            {
+                "Open": np.linspace(100.0, 112.0, 25),
+                "High": np.linspace(101.0, 113.0, 25),
+                "Low": np.linspace(99.0, 111.0, 25),
+                "Close": np.linspace(100.5, 112.5, 25),
+                "Volume": [100000.0] * 24 + [float("nan")],
+            },
+            index=idx,
+        )
+        monkeypatch.setattr(
+            stocks_router.stock_service,
+            "get_stock_data",
+            lambda code, market="US", period="3mo": df_nan_vol.copy(),
+        )
+        resp = stocks_router.get_history("MU", market="US", period="3mo")
+        assert "data" in resp and len(resp["data"]) == 25
+        assert resp["data"][0]["volume"] == 100000
+        assert resp["data"][-1]["volume"] is None
+
+
+    def test_batch4_segment3_archive_and_ux_fixes(self):
+        """
+        [第四批·第三段-8/9 验证]
+        1. strategies/、risk/、position_plan_v2.py 已移入 archive/，根目录原路径已删除，
+           且除 archive/ 外全仓库代码对上述归档模块零引用
+        2. A 股财报日历自动跳过，不再产生恒定 no_data；前端 Home/Analysis/Portfolio/Backtest 四项小修全部就位
+        """
+        import re
+        from pathlib import Path
+        from app.database import SessionLocal
+        from app.models import Watchlist
+        from app.routers.stocks import get_earnings_calendar
+
+        repo_root = Path(__file__).resolve().parents[3]
+        arch_dir = repo_root / "archive"
+
+        # 1. 验证原路径已移除、归档路径已存在
+        assert not (repo_root / "strategies").exists()
+        assert not (repo_root / "risk").exists()
+        assert not (repo_root / "position_plan_v2.py").exists()
+        assert (arch_dir / "strategies" / "multi_factor.py").exists()
+        assert (arch_dir / "risk" / "position_sizing.py").exists()
+        assert (arch_dir / "position_plan_v2.py").exists()
+        assert "position_plan_v2.py" in (arch_dir / "README.md").read_text(encoding="utf-8")
+
+        # 2. 全仓扫描（排除 archive/ 与测试断言自身）：确认零外部引用
+        forbidden_patterns = [
+            re.compile(r"^\s*(?:from|import)\s+strategies\b", re.M),
+            re.compile(r"^\s*(?:from|import)\s+risk\b", re.M),
+            re.compile(r"\bposition_plan_v2\b"),
+        ]
+        offending = []
+        for pyf in repo_root.rglob("*.py"):
+            if "archive" in pyf.parts or pyf.name == "test_services.py":
+                continue
+            content = pyf.read_text(encoding="utf-8", errors="ignore")
+            for pat in forbidden_patterns:
+                if pat.search(content):
+                    offending.append(str(pyf.relative_to(repo_root)))
+        assert offending == [], f"除 archive/ 外发现残留引用: {offending}"
+
+        # 3. 验证 A 股在 get_earnings_calendar 中自动跳过，不会塞进 no_data
+        db = SessionLocal()
+        try:
+            db.add(Watchlist(stock_code="600519", stock_name="贵州茅台", market="A"))
+            db.commit()
+            cal_res = get_earnings_calendar(db=db)
+            no_data_codes = [x["stock_code"] for x in cal_res.get("no_data", [])]
+            assert "600519" not in no_data_codes, "A股不应再进入财报日历 no_data 列表"
+        finally:
+            db.query(Watchlist).filter(Watchlist.stock_code == "600519").delete()
+            db.commit()
+            db.close()
+
+        # 4. 验证前端四项修复落地
+        fe_src = repo_root / "stock-platform" / "frontend" / "src"
+        bt_txt = (fe_src / "pages" / "Backtest.tsx").read_text(encoding="utf-8")
+        assert "formatBacktestTooltipLine" in bt_txt
+
+        port_txt = (fe_src / "pages" / "Portfolio.tsx").read_text(encoding="utf-8")
+        assert "买入价${currencySymbol(sellingPosition.market)}" in port_txt
+        assert "resolvePositionsViewState" in port_txt
+
+        an_txt = (fe_src / "pages" / "Analysis.tsx").read_text(encoding="utf-8")
+        assert "analysisMode" in an_txt and "深度投研 (35/15/25/25)" in an_txt

@@ -7,7 +7,7 @@ import dayjs from 'dayjs';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
 import { colors } from '../theme/tokens';
-import { calcPositionSize, currencySymbol, downloadCsv } from '../utils/format';
+import { calcPositionSize, currencySymbol, downloadCsv, resolvePositionsViewState } from '../utils/format';
 
 const Portfolio: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -17,7 +17,7 @@ const Portfolio: React.FC = () => {
   const [capitalInput, setCapitalInput] = useState<number | null>(null);
   const [capitalSaving, setCapitalSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);   // 弹窗提交防重复点击
-  const [loadErrors, setLoadErrors] = useState<{ detail?: boolean; stats?: boolean }>({});
+  const [loadErrors, setLoadErrors] = useState<{ detail?: boolean; positions?: boolean; history?: boolean; stats?: boolean }>({});
 
   const [sellModalVisible, setSellModalVisible] = useState(false);
   const [sellingPosition, setSellingPosition] = useState<Position | null>(null);
@@ -44,11 +44,11 @@ const Portfolio: React.FC = () => {
       portfolioApi.getSummary(),
       portfolioApi.getTotalCapital()
     ]);
-    const failed: { detail?: boolean; stats?: boolean } = {};
+    const failed: { detail?: boolean; positions?: boolean; history?: boolean; stats?: boolean } = {};
     if (positionsRes.status === 'fulfilled') setPositions(positionsRes.value.data);
-    else failed.detail = true;
+    else { failed.detail = true; failed.positions = true; }
     if (historyRes.status === 'fulfilled') setHistory(historyRes.value.data);
-    else failed.detail = true;
+    else { failed.detail = true; failed.history = true; }
     if (summaryRes.status === 'fulfilled') setSummary(summaryRes.value.data);
     else failed.stats = true;
     if (capitalRes.status === 'fulfilled') {
@@ -114,7 +114,8 @@ const Portfolio: React.FC = () => {
         sell_price: values.sell_price,
         sell_date: values.sell_date.format('YYYY-MM-DD')
       });
-      message.success(`卖出成功！已实现盈亏 ${res.data.realized_pnl >= 0 ? '+' : ''}$${res.data.realized_pnl}（${res.data.realized_pnl_pct}%），持有${res.data.holding_days}天`);
+      const sym = currencySymbol(sellingPosition.market);
+      message.success(`卖出成功！已实现盈亏 ${res.data.realized_pnl >= 0 ? '+' : ''}${sym}${res.data.realized_pnl}（${res.data.realized_pnl_pct}%），持有${res.data.holding_days}天`);
       setSellModalVisible(false);
       fetchData();
     } catch (error) {
@@ -554,8 +555,16 @@ const Portfolio: React.FC = () => {
           items={[
             {
               key: 'holding',
-              label: `当前持仓 (${positions.length})`,
-              children: (
+              label: `当前持仓 (${loadErrors.positions ? '加载失败' : positions.length})`,
+              children: resolvePositionsViewState(loading, !!loadErrors.positions, positions.length) === 'error' ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="当前持仓请求失败——无法读取持仓列表（并非暂无持仓）"
+                  description="请检查后端服务或网络连接后点击右侧按钮重试。"
+                  action={<Button size="small" danger onClick={fetchData}>重新加载</Button>}
+                />
+              ) : (
                 <Table
                   columns={holdingColumns}
                   dataSource={positions}
@@ -569,8 +578,15 @@ const Portfolio: React.FC = () => {
             },
             {
               key: 'history',
-              label: `历史交易 (${history.length})`,
-              children: (
+              label: `历史交易 (${loadErrors.history ? '加载失败' : history.length})`,
+              children: resolvePositionsViewState(loading, !!loadErrors.history, history.length) === 'error' ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="历史交易请求失败——无法读取历史交易记录"
+                  action={<Button size="small" danger onClick={fetchData}>重新加载</Button>}
+                />
+              ) : (
                 <Table
                   columns={historyColumns}
                   dataSource={history}
@@ -601,14 +617,14 @@ const Portfolio: React.FC = () => {
           <Alert
             type="info"
             style={{ marginBottom: 16 }}
-            message={`买入价$${sellingPosition.buy_price} × ${sellingPosition.quantity}股 | 现价$${sellingPosition.current_price ?? '-'} | 浮动盈亏${sellingPosition.profit_loss_pct ?? '-'}%`}
+            message={`买入价${currencySymbol(sellingPosition.market)}${sellingPosition.buy_price} × ${sellingPosition.quantity}股 | 现价${currencySymbol(sellingPosition.market)}${sellingPosition.current_price ?? '-'} | 浮动盈亏${sellingPosition.profit_loss_pct ?? '-'}%`}
           />
         )}
         <Form form={sellForm} layout="vertical">
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item name="sell_price" label="卖出价格" rules={[{ required: true, message: '请输入卖出价格' }]}>
-                <InputNumber style={{ width: '100%' }} min={0} step={0.01} />
+              <Form.Item name="sell_price" label={`卖出价格 (${currencySymbol(sellingPosition?.market)})`} rules={[{ required: true, message: '请输入卖出价格' }]}>
+                <InputNumber prefix={currencySymbol(sellingPosition?.market)} style={{ width: '100%' }} min={0} step={0.01} />
               </Form.Item>
             </Col>
             <Col span={12}>

@@ -20,6 +20,9 @@ def _run_migrations():
     migrations = [
         "ALTER TABLE positions ADD COLUMN sell_price FLOAT",
         "ALTER TABLE positions ADD COLUMN sell_date DATETIME",
+        "ALTER TABLE positions ADD COLUMN initial_price FLOAT",
+        "ALTER TABLE positions ADD COLUMN add_count INTEGER DEFAULT 0",
+        "ALTER TABLE positions ADD COLUMN highest_price FLOAT",
     ]
     with engine.connect() as conn:
         for stmt in migrations:
@@ -29,6 +32,17 @@ def _run_migrations():
             except Exception:
                 # 列已存在，跳过
                 pass
+    # 启动时自动排查并原地合并存量重复 holding 行（防历史多行持仓导致重复止损告警）
+    try:
+        from .database import SessionLocal
+        from .routers.portfolio import consolidate_duplicate_holdings
+        db = SessionLocal()
+        try:
+            consolidate_duplicate_holdings(db)
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 _run_migrations()

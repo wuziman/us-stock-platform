@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { colors } from '../theme/tokens';
-import { METRIC_LABEL, STRATEGY_COLORS, fmtParams, periodLabel } from './backtestFormat';
+import { METRIC_LABEL, STRATEGY_COLORS, fmtParams, periodLabel, formatBacktestTooltipLine } from './backtestFormat';
 
 describe('periodLabel 回测周期标签', () => {
   it('映射已知周期', () => {
@@ -35,5 +35,28 @@ describe('METRIC_LABEL / STRATEGY_COLORS', () => {
     const cs = Object.values(STRATEGY_COLORS);
     expect(new Set(cs).size).toBe(cs.length);
     expect(STRATEGY_COLORS.linear).toBe(colors.primary);
+  });
+});
+
+describe('formatBacktestTooltipLine 回测B/S散点tooltip防$NaN', () => {
+  it('B/S散点value为[date, equity]数组时不出现$NaN并展示成交价与总资产', () => {
+    const buyLine = formatBacktestTooltipLine({
+      marker: '<span>●</span>',
+      seriesName: '买入点 (B)',
+      value: ['2026-05-10', 102500],
+      data: { value: ['2026-05-10', 102500], price: 95.5, shares: 200 },
+    });
+    expect(buyLine.includes('NaN')).toBe(false);
+    expect(buyLine.includes('$95.50')).toBe(true);
+    expect(buyLine.includes('200股')).toBe(true);
+
+    const sellLine = formatBacktestTooltipLine({
+      marker: '<span>●</span>',
+      seriesName: '卖出点 (S)',
+      value: ['2026-06-01', 115000],
+      data: { value: ['2026-06-01', 115000], price: 110.0, profit_pct: 0.1518 },
+    });
+    expect(sellLine.includes('NaN')).toBe(false);
+    expect(sellLine.includes('+15.18%')).toBe(true);
   });
 });

@@ -120,11 +120,14 @@ SYSTEM_PROMPT = """你是一位采用"Serenity供应链卡点思维"的美股投
 
 def build_selection_messages(universe_briefs: List[Dict],
                              xhs_digest: str) -> List[Dict]:
-    """组装LLM消息列表（纯函数）"""
+    """组装LLM消息列表（纯函数；当 xhs_digest 为空时自动标注仅基于行情与新闻选股）"""
     universe_text = '\n\n'.join(_format_brief(b) for b in universe_briefs)
+    xhs_block = xhs_digest.strip() if xhs_digest else ""
+    if not xhs_block or xhs_block == '（暂无小红书博主内容）':
+        xhs_block = "（小红书源未配置或无可用缓存，本次仅基于行情与新闻选股）"
     user_content = (
         f"# 候选标的简报（共{len(universe_briefs)}只）\n{universe_text}\n\n"
-        f"# 小红书博主近期观点（辅助参考，注意甄别信息质量）\n{xhs_digest}\n\n"
+        f"# 小红书博主近期观点（可选辅助参考，注意甄别信息质量）\n{xhs_block}\n\n"
         f"请按系统框架分析并输出JSON。今天是{date.today().isoformat()}。"
     )
     return [{'role': 'system', 'content': SYSTEM_PROMPT},
@@ -181,15 +184,73 @@ def get_universe() -> List[tuple]:
     return [(c, n) for c, n in DEFAULT_UNIVERSE][:MAX_UNIVERSE]
 
 
-def run_ai_pick() -> Dict:
-    """完整选股流水线：并发拉取简报→小红书→LLM→解析→入库。任何环节失败抛异常由路由转HTTP错误"""
+def run_ai_pick(force: bool = False) -> Dict:
+    """完整选股流水线：同日去重检查→并发拉取简报→小红书（可选降级）→LLM→解析→入库。"""
+    from ..utils.timezone import today_beijing, now_beijing
+
+    today = today_beijing().isoformat()
+    if not force:
+        db_check = SessionLocal()
+        try:
+            existing_rows = (
+                db_check.query(AIPick)
+                .filter(AIPick.run_date == today)
+                .order_by(AIPick.rank.asc(), AIPick.id.asc())
+                .all()
+            )
+            if existing_rows:
+                saved_existing = [
+                    {
+                        'rank': r.rank,
+                        'code': r.stock_code,
+                        'name': r.stock_name,
+                        'confidence': r.confidence,
+                        'thesis': r.thesis,
+                        'bottlenecks': r.bottlenecks,
+                        'risks': r.risks,
+                        'catalysts': r.catalysts,
+                        'price_at_pick': r.price_at_pick,
+                    }
+                    for r in existing_rows
+                ]
+                logger.info(f"AI选股同日去重命中({today})：直接返回已存 {len(saved_existing)} 条记录，不重复调用LLM")
+                return {
+                    'run_date': today,
+                    'already_ran': True,
+                    'message': '今日已运行，直接返回当日选股结果（未重复消耗LLM额度）',
+                    'model_commentary': existing_rows[0].market_commentary or '',
+                    'picks': saved_existing,
+                    'universe_size': 0,
+                }
+        finally:
+            db_check.close()
+
     if not is_ai_configured():
         raise RuntimeError('AI供应商未配置：请先在config/config.json填写ai_provider')
 
     universe = get_universe()
     with ThreadPoolExecutor(max_workers=min(8, max(len(universe), 1))) as executor:
         briefs = list(executor.map(lambda pair: _stock_brief(pair[0], pair[1]), universe))
-    xhs_digest = xhs_service.digest_recent()
+
+    # 小红书降级为可选源：无 Cookie 或抓取/摘要异常时跳过小红书源，xhs_digest 置为空串照常运行
+    xhs_digest = ""
+    db_xhs = SessionLocal()
+    try:
+        xhs_cfg = xhs_service.get_xhs_config(db_xhs)
+        cookie_ok = bool(xhs_cfg.get('cookie_set'))
+    except Exception:
+        cookie_ok = False
+    finally:
+        db_xhs.close()
+
+    if cookie_ok:
+        try:
+            raw_digest = xhs_service.digest_recent() or ""
+            if raw_digest.strip() and raw_digest.strip() != '（暂无小红书博主内容）':
+                xhs_digest = raw_digest
+        except Exception as e:
+            logger.warning(f"小红书摘要读取失败，自动跳过xhs源: {e}")
+            xhs_digest = "" 
 
     messages = build_selection_messages(briefs, xhs_digest)
     # 推理类模型(如ox-alpha)会消耗大量token思考，需给足输出空间
@@ -202,7 +263,6 @@ def run_ai_pick() -> Dict:
         'news_total': sum(len(b.get('news', [])) for b in briefs),
     }
 
-    today = date.today().isoformat()
     db = SessionLocal()
     saved = []
     try:
@@ -215,7 +275,7 @@ def run_ai_pick() -> Dict:
                 market_commentary=result['market_commentary'],
                 price_at_pick=price_map.get(p['code']),
                 evidence_json=json.dumps(evidence, ensure_ascii=False),
-                created_at=datetime.now())
+                created_at=now_beijing())
             db.add(row)
             saved.append({**p, 'price_at_pick': price_map.get(p['code'])})
         db.commit()
@@ -224,7 +284,8 @@ def run_ai_pick() -> Dict:
 
     logger.info(f"AI选股完成：{[(p['rank'], p['code']) for p in saved]}")
     return {'run_date': today, 'model_commentary': result['market_commentary'],
-            'picks': saved, 'universe_size': len(briefs)}
+            'picks': saved, 'universe_size': len(briefs),
+            'xhs_digest': xhs_digest, 'xhs_skipped': not bool(xhs_digest)}
 
 
 # ============================================
@@ -343,3 +404,140 @@ def get_xhs_summaries(db: Session) -> List[Dict]:
         'period_end': r.period_end,
         'created_at': r.created_at.isoformat() if r.created_at else None,
     } for r in rows]
+
+
+# ============================================
+# [第三批·第二段-3] AI选股 20/60 交易日业绩复盘（按 confidence 分层统计，未到期标 pending）
+# ============================================
+def compute_ai_picks_performance(
+    picks: List,
+    klines_by_code: Dict[str, object] = None,
+    kline_map: Dict[str, object] = None,
+) -> Dict:
+    """
+    计算历史 AI 选股记录在入选后 +20 个交易日与 +60 个交易日的真实前向收益与分层胜率（纯函数）：
+    - 严格按交易日序列向后数第 20 根 / 第 60 根 K 线收盘价计算收益
+    - 若入选日之后交易日不足 20 / 60 根，状态标记为 'pending'（未到期），绝不用未满期现价冒充终值！
+    - 按 confidence ('high' / 'medium' / 'low') 及 'overall' 汇总样本数、已到期数、胜率与平均收益
+    - 仅做观测统计，不反向修改选股 Prompt 或模型参数
+    """
+    from bisect import bisect_right
+
+    def _get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    # 预处理每只股票的交易日收盘序列: code -> (sorted_dates, [closes])
+    series_map = {}
+    for code, df in (klines_by_code or kline_map or {}).items():
+        if df is None or getattr(df, "empty", True) or "Close" not in df.columns:
+            continue
+        date_closes = {}
+        for idx, row in df.iterrows():
+            try:
+                c = float(row["Close"])
+                if c == c and c > 0:
+                    d_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+                    date_closes[d_str] = c
+            except Exception:
+                continue
+        if date_closes:
+            s_dates = sorted(date_closes.keys())
+            series_map[code] = (s_dates, [date_closes[d] for d in s_dates])
+
+    items = []
+    for p in picks or []:
+        code = str(_get(p, "stock_code") or _get(p, "code") or "").upper().strip()
+        run_date = str(_get(p, "run_date") or "")[:10]
+        conf = str(_get(p, "confidence") or "medium").lower().strip()
+        if conf not in ("high", "medium", "low"):
+            conf = "medium"
+        raw_entry = _get(p, "price_at_pick")
+
+        ret_20d = None
+        ret_60d = None
+        status_20d = "pending"
+        status_60d = "pending"
+        entry_px = float(raw_entry) if (raw_entry is not None and float(raw_entry) > 0) else None
+
+        if code in series_map and run_date:
+            s_dates, s_closes = series_map[code]
+            pos = bisect_right(s_dates, run_date) - 1
+            if pos >= 0:
+                if entry_px is None:
+                    entry_px = s_closes[pos]
+                if entry_px and entry_px > 0:
+                    if pos + 20 < len(s_closes):
+                        c20 = s_closes[pos + 20]
+                        ret_20d = round((c20 / entry_px - 1.0) * 100.0, 2)
+                        status_20d = "matured"
+                    if pos + 60 < len(s_closes):
+                        c60 = s_closes[pos + 60]
+                        ret_60d = round((c60 / entry_px - 1.0) * 100.0, 2)
+                        status_60d = "matured"
+
+        items.append({
+            "id": _get(p, "id"),
+            "run_date": run_date,
+            "rank": _get(p, "rank"),
+            "stock_code": code,
+            "stock_name": _get(p, "stock_name") or _get(p, "name") or code,
+            "confidence": conf,
+            "price_at_pick": round(entry_px, 2) if entry_px else None,
+            "return_20d_pct": ret_20d,
+            "status_20d": status_20d,
+            "return_60d_pct": ret_60d,
+            "status_60d": status_60d,
+        })
+
+    def _summarize_tier(tier_name: str, subset: List[Dict]) -> Dict:
+        m20 = [x for x in subset if x["status_20d"] == "matured" and x["return_20d_pct"] is not None]
+        m60 = [x for x in subset if x["status_60d"] == "matured" and x["return_60d_pct"] is not None]
+        w20 = sum(1 for x in m20 if x["return_20d_pct"] > 0)
+        w60 = sum(1 for x in m60 if x["return_60d_pct"] > 0)
+        d20_stat = {
+            "matured_count": len(m20),
+            "pending_count": len(subset) - len(m20),
+            "win_count": w20,
+            "win_rate": round(w20 / len(m20) * 100.0, 1) if m20 else None,
+            "avg_return_pct": round(sum(x["return_20d_pct"] for x in m20) / len(m20), 2) if m20 else None,
+        }
+        d60_stat = {
+            "matured_count": len(m60),
+            "pending_count": len(subset) - len(m60),
+            "win_count": w60,
+            "win_rate": round(w60 / len(m60) * 100.0, 1) if m60 else None,
+            "avg_return_pct": round(sum(x["return_60d_pct"] for x in m60) / len(m60), 2) if m60 else None,
+        }
+        return {
+            "confidence": tier_name,
+            "total_picks": len(subset),
+            "matured_20d": d20_stat["matured_count"],
+            "pending_20d": d20_stat["pending_count"],
+            "win_rate_20d": d20_stat["win_rate"],
+            "avg_return_20d": d20_stat["avg_return_pct"],
+            "matured_60d": d60_stat["matured_count"],
+            "pending_60d": d60_stat["pending_count"],
+            "win_rate_60d": d60_stat["win_rate"],
+            "avg_return_60d": d60_stat["avg_return_pct"],
+            "d20": d20_stat,
+            "d60": d60_stat,
+        }
+
+    by_confidence = {
+        tier: _summarize_tier(tier, [x for x in items if x["confidence"] == tier])
+        for tier in ("high", "medium", "low")
+    }
+    overall = _summarize_tier("overall", items)
+
+    return {
+        "total_picks": len(items),
+        "by_confidence": by_confidence,
+        "overall": overall,
+        "items": items,
+        "picks": items,
+        "observe_only": True,
+        "policy_note": "仅作20/60交易日分层业绩统计，不反向调参",
+        "note": "仅作20/60交易日分层业绩统计，未满交易日样本标为 pending 不计入胜率分母，不反向调参",
+    }

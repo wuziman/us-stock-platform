@@ -62,6 +62,29 @@ class PositionManager:
             return buy_price * 1.46
         return buy_price * 1.15
 
+
+    def calculate_position_size_kelly(
+        self,
+        win_rate: float,
+        avg_win: float,
+        avg_loss: float,
+        capital: float,
+        price: float,
+        kelly_fraction: float = 0.5,
+        max_position_size: float = 0.40,
+    ) -> int:
+        """
+        半凯利公式计算建议股数（原 risk/position_sizing.py 归档后收敛至此）
+        """
+        if avg_loss <= 0 or price <= 0:
+            return 0
+        win_loss_ratio = avg_win / avg_loss
+        kelly = (win_rate * win_loss_ratio - (1.0 - win_rate)) / win_loss_ratio
+        kelly = max(0.0, min(max_position_size, kelly * kelly_fraction))
+        position_value = capital * kelly
+        shares = int(position_value / price)
+        return max(1, shares) if kelly > 0 else 0
+
     def should_add_position(self, stock_code, current_price, buy_price=None, strategy_type="linear"):
         """
         判断是否应该补仓（按 5% / 10% / 15% 三档阶梯触发，每档仅补仓一次，最多补 3 次）
