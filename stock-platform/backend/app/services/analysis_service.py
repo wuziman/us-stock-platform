@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import requests
 from typing import Dict, Tuple, Any, List
-from .stock_service import StockService, _get_cn_session
+from .stock_service import StockService, _get_cn_session, _resolve_cn_symbol
 from .tech_score import calculate_tech_score
 from ..utils.indicators import calculate_all_indicators
 from ..utils.app_config import load_config
@@ -230,47 +230,18 @@ class AnalysisService:
         # 确定推荐等级
         recommendation = self._get_recommendation(total_score)
 
-        # 核心标的财报日历与排雷雷达
-        earnings_radar = {
+        # 核心标的财报日历与排雷雷达（由 _analyze_events 在并行线程池中一次性拉取并传入，消除二次重复请求）
+        default_radar = {
             'date': None,
             'days_away': None,
             'tag': '',
             'is_imminent': False
         }
-        if market == 'US':
-            try:
-                import yfinance as yf
-                from datetime import date
-                cal = yf.Ticker(stock_code).calendar
-                candidates = None
-                if isinstance(cal, dict):
-                    candidates = cal.get('Earnings Date')
-                elif cal is not None and hasattr(cal, 'to_dict'):
-                    candidates = cal.to_dict().get('Earnings Date')
-                if candidates:
-                    today = date.today()
-                    normalized = []
-                    for d in candidates:
-                        try:
-                            normalized.append(d.date() if callable(getattr(d, 'date', None)) else d)
-                        except Exception:
-                            continue
-                    future = [d for d in normalized if isinstance(d, date) and d >= today]
-                    if future:
-                        nxt = min(future)
-                        days = (nxt - today).days
-                        earnings_radar['date'] = nxt.isoformat()
-                        earnings_radar['days_away'] = days
-                        if days == 0:
-                            earnings_radar['tag'] = "🚨【今晚盘后发布财报】期权波动率暴增，严禁左侧重仓博弈！"
-                            earnings_radar['is_imminent'] = True
-                        elif 0 < days <= 3:
-                            earnings_radar['tag'] = f"⚠️【{days}天后发布财报 ({nxt.isoformat()})】防范业绩暴击风险"
-                            earnings_radar['is_imminent'] = True
-                        elif 3 < days <= 14:
-                            earnings_radar['tag'] = f"📅【财报倒计时 {days}天】({nxt.isoformat()})"
-            except Exception as e:
-                print(f"[Earnings Radar] 获取 {stock_code} 异常: {e}")
+        earnings_radar = (
+            event_details.pop('earnings_radar', None)
+            if isinstance(event_details, dict)
+            else None
+        ) or default_radar
 
         # 若财报临近（今晚或3天内），启动风控降级保护
         if earnings_radar['is_imminent'] and recommendation.get('action') == '买入':
@@ -450,14 +421,13 @@ class AnalysisService:
         return items
 
     def _fetch_news_cn(self, stock_code: str) -> List[Dict]:
-        """A股新闻：新浪个股新闻页（直连不走代理）"""
+        """A股新闻：新浪个股新闻页（直连不走代理，统一复用 _resolve_cn_symbol 兼容 .SS/.SH/.SZ）"""
         items: List[Dict] = []
 
-        code = stock_code.replace('.SH', '').replace('.SZ', '')
+        code, prefix, _ = _resolve_cn_symbol(stock_code)
         if len(code) != 6 or not code.isdigit():
             return items
 
-        prefix = 'sh' if code.startswith('6') else 'sz'
         url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/{prefix}{code}.phtml"
 
         try:
@@ -623,49 +593,82 @@ class AnalysisService:
     # 4. 事件驱动（财报日历）
     # ============================================
     def _analyze_events(self, stock_code: str, stock_name: str, market: str = "US") -> Tuple[float, Dict]:
-        """事件驱动分析：财报日历（美股），A股暂用定期报告窗口期提醒"""
+        """事件驱动分析：财报日历与排雷雷达（美股单次拉取复用，时区安全），A股用定期报告窗口期提醒"""
+        from datetime import date
+
         score = 5.0
-        details: Dict[str, Any] = {'events': [], 'sources': []}
+        earnings_radar = {
+            'date': None,
+            'days_away': None,
+            'tag': '',
+            'is_imminent': False,
+        }
+        details: Dict[str, Any] = {'events': [], 'sources': [], 'earnings_radar': earnings_radar}
 
         if market == "US":
             try:
                 import yfinance as yf
                 cal = yf.Ticker(stock_code).calendar
-                earnings_dates = None
+                candidates = None
                 if isinstance(cal, dict):
-                    earnings_dates = cal.get('Earnings Date')
+                    candidates = cal.get('Earnings Date')
+                elif cal is not None and hasattr(cal, 'to_dict'):
+                    candidates = cal.to_dict().get('Earnings Date')
                 elif cal is not None and hasattr(cal, 'loc'):
                     try:
-                        earnings_dates = cal.loc['Earnings Date']
+                        candidates = cal.loc['Earnings Date']
                     except KeyError:
                         pass
 
-                if earnings_dates:
-                    if isinstance(earnings_dates, (list, pd.DatetimeIndex)):
-                        next_date = earnings_dates[0]
-                    else:
-                        next_date = earnings_dates
+                if candidates is not None:
+                    if not isinstance(candidates, (list, tuple, pd.DatetimeIndex, pd.Series)):
+                        candidates = [candidates]
+                    today = date.today()
+                    normalized = []
+                    for d in candidates:
+                        try:
+                            if callable(getattr(d, 'date', None)):
+                                normalized.append(d.date())
+                            elif isinstance(d, date):
+                                normalized.append(d)
+                            else:
+                                normalized.append(pd.Timestamp(d).date())
+                        except Exception:
+                            continue
 
-                    if hasattr(next_date, 'date'):
-                        date_str = next_date.date().isoformat()
-                    else:
-                        date_str = str(next_date)
+                    if normalized:
+                        future = [d for d in normalized if d >= today]
+                        nxt = min(future) if future else normalized[0]
+                        days_away = (nxt - today).days
+                        date_str = nxt.isoformat()
 
-                    details['sources'].append('yfinance')
-                    days_away = (pd.Timestamp(next_date) - pd.Timestamp.now()).days
-                    details['events'].append({
-                        'name': '财报发布',
-                        'date': date_str,
-                        'days_away': days_away,
-                        'impact': '财报临近，波动可能加剧'
-                    })
-                    if 0 <= days_away <= 7:
-                        score -= 0.5
-                        details['events'][-1]['impact'] = '⚠️ 财报临近（7天内），业绩不确定性高，注意波动风险'
+                        details['sources'].append('yfinance')
+                        impact = '财报临近，波动可能加剧'
+                        if 0 <= days_away <= 7:
+                            score -= 0.5
+                            impact = '⚠️ 财报临近（7天内），业绩不确定性高，注意波动风险'
+
+                        details['events'].append({
+                            'name': '财报发布',
+                            'date': date_str,
+                            'days_away': days_away,
+                            'impact': impact,
+                        })
+
+                        if days_away >= 0:
+                            earnings_radar['date'] = date_str
+                            earnings_radar['days_away'] = days_away
+                            if days_away == 0:
+                                earnings_radar['tag'] = "🚨【今晚盘后发布财报】期权波动率暴增，严禁左侧重仓博弈！"
+                                earnings_radar['is_imminent'] = True
+                            elif 0 < days_away <= 3:
+                                earnings_radar['tag'] = f"⚠️【{days_away}天后发布财报 ({date_str})】防范业绩暴击风险"
+                                earnings_radar['is_imminent'] = True
+                            elif 3 < days_away <= 14:
+                                earnings_radar['tag'] = f"📅【财报倒计时 {days_away}天】({date_str})"
             except Exception as e:
                 print(f"财报日历获取失败: {e}")
         else:
-            from datetime import date
             m = date.today().month
             window_note = (
                 "当前处于A股财报密集披露月（1/4/7/8/10月），注意业绩暴雷或超预期催化"

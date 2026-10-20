@@ -25,3 +25,11 @@
 6. `position_plan_v2.py`
    - **原位置**：仓库根目录 `position_plan_v2.py`
    - **归档原因**：早期一次性静态打印脚本（硬编码特定日期买点），其 `-5% / -10% / -15%` 三档分批补仓与首仓永久锚定逻辑已收敛至 `position_manager.py` 与 `POST /api/portfolio/{id}/add-tranche`。
+
+7. `legacy_root_scripts/`（`backtest_comparison.py`、`backtest_hybrid.py`、`calculate_nonlinear_points.py`、`compare_versions.py`）
+   - **原位置**：仓库根目录
+   - **归档原因**：早期命令行对比实验与静态买点测算脚本，核心算法已全部收敛至 `stock-platform/backend/app/services/backtest_service.py` 与 `app/utils/price_levels.py`。
+
+8. `legacy_backend_manual_tests/`（8 个早期手动 `print` 调试脚本 `test_*.py`）
+   - **原位置**：`stock-platform/backend/test_*.py`
+   - **归档原因**：早期无 `assert` 的手动联网打印脚本，现已由 `stock-platform/backend/tests/` 下基于 `pytest` 的 243 个自动化回归测试全面替代。

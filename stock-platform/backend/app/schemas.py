@@ -92,9 +92,10 @@ class RiskSwitchesUpdate(BaseModel):
 
 
 class PositionSell(BaseModel):
-    """卖出持仓"""
+    """卖出持仓（支持全仓卖出或传入 sell_quantity 分批部分止盈/减仓）"""
     sell_price: float = Field(..., gt=0)
     sell_date: datetime
+    sell_quantity: Optional[int] = Field(None, ge=1)
 
 
 class PositionUpdate(BaseModel):
@@ -146,6 +147,7 @@ class BacktestRequest(BaseModel):
     end_date: Optional[str] = None
     initial_capital: float = Field(100000, gt=0)
     commission_per_trade: float = Field(1.0, ge=0)  # 每笔交易手续费（美元，禁止负数刷收益）
+    slippage_bps: float = Field(0.0, ge=0.0, le=500.0)  # 单边滑点基点（默认0，10 bps = 0.10%）
     trailing_stop: bool = False        # 是否启用移动止盈与浮盈+10%保本损
     staged_entry: bool = False         # 是否启用分批金字塔建仓（首仓50%+回撤5%补仓50%）
     params: Optional[Dict[str, float]] = None  # 可选策略自定义参数
@@ -162,6 +164,7 @@ class BacktestResponse(BaseModel):
     trade_count: int = 0
     total_fees: float = 0.0  # 总手续费
     commission_per_trade: float = 1.0  # 单笔手续费
+    slippage_bps: float = 0.0  # 单边滑点基点
     initial_capital: float = 100000
     final_value: Optional[float] = None
     equity_curve: List[Dict[str, Any]] = []
@@ -177,6 +180,7 @@ class BacktestCompareRequest(BaseModel):
     period: str = "1y"
     initial_capital: float = Field(100000, gt=0)
     commission_per_trade: float = Field(1.0, ge=0)
+    slippage_bps: float = Field(0.0, ge=0.0, le=500.0)
     trailing_stop: bool = False
     staged_entry: bool = False
 

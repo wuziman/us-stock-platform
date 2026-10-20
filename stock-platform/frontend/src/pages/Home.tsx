@@ -350,13 +350,15 @@ const Home: React.FC = () => {
           action={<Button size="small" danger onClick={fetchData}>重新加载</Button>}
         />
       )}
-      {!loadErrors.summary && (
+      {!loadErrors.summary && (() => {
+        const sumPrefix = summary?.currency === 'CNY' ? '¥' : '$';
+        return (
       <Row gutter={16} style={{ marginTop: 16 }}>
         <Col xs={12} sm={12} lg={6}>
           <Card><Statistic title="持仓数量" value={summary?.total_positions || 0} prefix={<StockOutlined />} /></Card>
         </Col>
         <Col xs={12} sm={12} lg={6}>
-          <Card><Statistic title="持仓市值" value={summary?.total_value || 0} precision={2} prefix="$" /></Card>
+          <Card><Statistic title="持仓市值" value={summary?.total_value || 0} precision={2} prefix={sumPrefix} /></Card>
         </Col>
         <Col xs={12} sm={12} lg={6}>
           <Card>
@@ -364,7 +366,7 @@ const Home: React.FC = () => {
               title="总盈亏"
               value={summary?.total_profit || 0}
               precision={2}
-              prefix="$"
+              prefix={sumPrefix}
               suffix={(summary?.total_profit || 0) > 0 ? <ArrowUpOutlined style={{ color: colors.profit }} /> : (summary?.total_profit || 0) < 0 ? <ArrowDownOutlined style={{ color: colors.loss }} /> : undefined}
               valueStyle={{ color: (summary?.total_profit || 0) > 0 ? colors.profit : (summary?.total_profit || 0) < 0 ? colors.loss : colors.textSecondary }}
             />
@@ -382,7 +384,8 @@ const Home: React.FC = () => {
           </Card>
         </Col>
       </Row>
-      )}
+        );
+      })()}
 
       {/* 风控预警摘要 */}
       {summary?.warnings && summary.warnings.length > 0 && (

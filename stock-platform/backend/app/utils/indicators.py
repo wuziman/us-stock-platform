@@ -156,21 +156,30 @@ def calculate_ema(prices: pd.Series, period: int = 20, column: str = 'Close') ->
     return prices.ewm(span=period, adjust=False).mean()
 
 
-def calculate_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
-    """计算OBV能量潮指标"""
+def calculate_obv(close: pd.Series, volume: pd.Series = None) -> pd.Series:
+    """计算OBV能量潮指标（兼容传入 DataFrame 或 (close, volume) Series）"""
+    if isinstance(close, pd.DataFrame):
+        df_in = close
+        close, volume = df_in['Close'], df_in['Volume']
     direction = np.sign(close.diff()).fillna(0.0)
     return (direction * volume).cumsum()
 
 
-def calculate_vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
-    """计算VWAP成交量加权平均价"""
+def calculate_vwap(high: pd.Series, low: pd.Series = None, close: pd.Series = None, volume: pd.Series = None) -> pd.Series:
+    """计算VWAP成交量加权平均价（兼容传入 DataFrame 或 (high, low, close, volume) Series）"""
+    if isinstance(high, pd.DataFrame):
+        df_in = high
+        high, low, close, volume = df_in['High'], df_in['Low'], df_in['Close'], df_in['Volume']
     tp = (high + low + close) / 3.0
     cum_vol = volume.cumsum().replace(0, np.nan)
     return (tp * volume).cumsum() / cum_vol
 
 
-def calculate_kdj(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 9, m1: int = 3, m2: int = 3):
+def calculate_kdj(high: pd.Series, low: pd.Series = None, close: pd.Series = None, n: int = 9, m1: int = 3, m2: int = 3):
     """计算KDJ指标"""
+    if isinstance(high, pd.DataFrame):
+        df_in = high
+        high, low, close = df_in['High'], df_in['Low'], df_in['Close']
     lowest_low = low.rolling(window=n, min_periods=1).min()
     highest_high = high.rolling(window=n, min_periods=1).max()
     denom = (highest_high - lowest_low).replace(0, np.nan)
@@ -181,8 +190,13 @@ def calculate_kdj(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 9,
     return k, d, j
 
 
-def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """计算ADX平均趋向指数"""
+def calculate_adx(high: pd.Series, low: pd.Series = None, close: pd.Series = None, period: int = 14) -> pd.Series:
+    """计算ADX平均趋向指数（兼容传入 DataFrame 或 (high, low, close) Series）"""
+    if isinstance(high, pd.DataFrame):
+        if isinstance(low, int) and close is None:
+            period = low
+        df_in = high
+        high, low, close = df_in['High'], df_in['Low'], df_in['Close']
     plus_dm = high.diff()
     minus_dm = -low.diff()
     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
@@ -218,11 +232,6 @@ def calculate_fibonacci_retracement(high_price: float, low_price: float) -> dict
     }
 
 calculate_sma = calculate_ma
-
-
-def calculate_sma(df: pd.DataFrame, period: int = 20) -> pd.Series:
-    """简单移动平均线"""
-    return df['Close'].rolling(window=period).mean()
 
 
 def calculate_stochastic(

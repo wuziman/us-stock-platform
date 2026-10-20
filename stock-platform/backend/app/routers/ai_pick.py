@@ -10,6 +10,7 @@ AI选股相关API
 - POST /api/ai-pick/xhs-summaries 生成各博主近期帖子AI总结
 """
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List
@@ -28,6 +29,8 @@ from ..utils.market import detect_market
 
 router = APIRouter(prefix="/api/ai-pick", tags=["ai-pick"])
 stock_service = StockService()
+_ai_pick_run_lock = threading.Lock()
+_top5_scan_lock = threading.Lock()
 
 
 def _repo_root() -> Path:
@@ -90,13 +93,17 @@ def get_status(db: Session = Depends(get_db)):
 
 @router.post("/run")
 def run_selection():
-    """运行一次完整AI选股（拉数据+LLM分析，约1-3分钟；同步def走线程池）"""
+    """运行一次完整AI选股（拉数据+LLM分析，约1-3分钟；同步def走线程池，带并发互斥锁）"""
+    if not _ai_pick_run_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有AI选股任务正在执行，请稍候再试")
     try:
         return run_ai_pick()
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI选股失败: {e}")
+    finally:
+        _ai_pick_run_lock.release()
 
 
 @router.get("/history")
@@ -220,12 +227,16 @@ def get_weekly_top5(db: Session = Depends(get_db)):
 
 @router.post("/top5/scan")
 def trigger_weekly_scan(db: Session = Depends(get_db)):
-    """触发平台内置 screener_service 执行全池扫描并持久化入库"""
+    """触发平台内置 screener_service 执行全池扫描并持久化入库（带并发互斥锁）"""
+    if not _top5_scan_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有猛禽池全池扫描任务正在执行，请稍候再试")
     from ..services import screener_service
     try:
         return screener_service.run_screener(db=db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"选股扫描失败: {e}")
+    finally:
+        _top5_scan_lock.release()
 
 
 @router.get("/top5/history")

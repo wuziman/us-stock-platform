@@ -39,17 +39,9 @@ from ..utils.price_levels import (
 
 
 def _is_regime_linkage_on() -> bool:
-    """读取 Setting 表中的 regime_linkage_enabled 开关（默认 True）"""
-    db = SessionLocal()
-    try:
-        row = db.query(Setting).filter(Setting.key == "regime_linkage_enabled").first()
-        if row is None or row.value is None:
-            return True
-        return str(row.value).strip().lower() not in ("false", "0", "no", "off")
-    except Exception:
-        return True
-    finally:
-        db.close()
+    """读取 Setting 表中的 regime_linkage_enabled 开关（统一委托 alert_service.is_regime_linkage_enabled，默认 True）"""
+    from .alert_service import is_regime_linkage_enabled
+    return is_regime_linkage_enabled()
 
 
 def _load_webhook() -> str:
@@ -107,7 +99,8 @@ class ReportService:
         qqq_change = 0.0
         try:
             vix_df = self.stock_service.get_stock_data("^VIX", "US", period="1mo")
-            if vix_df is not None and not vix_df.empty:
+            if vix_df is not None and not vix_df.empty and 'Close' in vix_df.columns:
+                vix_df = vix_df.dropna(subset=['Close'])
                 if as_of_date:
                     vix_df = vix_df[vix_df.index <= as_of_date]
                 if not vix_df.empty:
@@ -117,7 +110,8 @@ class ReportService:
 
         try:
             qqq_df = self.stock_service.get_stock_data("QQQ", "US", period="1mo")
-            if qqq_df is not None and not qqq_df.empty:
+            if qqq_df is not None and not qqq_df.empty and 'Close' in qqq_df.columns:
+                qqq_df = qqq_df.dropna(subset=['Close'])
                 if as_of_date:
                     qqq_df = qqq_df[qqq_df.index <= as_of_date]
                 if len(qqq_df) >= 2:

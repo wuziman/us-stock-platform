@@ -32,12 +32,25 @@ export interface PositionSizeInfo {
   risk_per_trade_pct: number;
   max_loss_amount: number;
   recommended_shares: number;
+  risk_2pct_shares?: number;
+  half_kelly_shares?: number | null;
+  score_tier_shares?: number | null;
   position_value: number;
   position_pct: number;
   first_tranche_shares: number;
   add_price_1: number;
+  add_price_2?: number;
+  add_price_3?: number;
   capped_by_40pct: boolean;
   half_kelly_pct?: number | null;
+  win_rate_used?: number | null;
+  reward_risk_ratio_used?: number;
+  kelly_source?: string;
+  rr_source?: string;
+  kelly_warning?: string | null;
+  sizing_mode?: string;
+  regime_status?: string;
+  regime_scale?: number;
 }
 
 // ===== 股票 / 自选股 =====
@@ -70,16 +83,59 @@ export interface EarningsItem {
 }
 
 // ===== 持仓 =====
+export interface HoldingAddSignal {
+  should_add: boolean;
+  add_count: number;
+  max_adds: number;
+  initial_price: number;
+  drop_from_initial_pct: number;
+  next_tier: number | null;
+  next_tier_drop_pct: number | null;
+  next_trigger_price: number | null;
+  suggested_add_amount: number;
+  suggested_add_shares: number;
+}
+
+export interface RiskSwitchesInfo {
+  sizing_mode: 'half_kelly_combined' | 'fixed_2pct' | string;
+  trailing_stop_enabled: boolean;
+  staged_add_enabled: boolean;
+  regime_linkage_enabled: boolean;
+}
+
+export interface AddTrancheResponse {
+  message: string;
+  position_id: number;
+  stock_code: string;
+  initial_price: number;
+  previous_buy_price: number;
+  new_buy_price: number;
+  previous_quantity: number;
+  added_quantity: number;
+  new_quantity: number;
+  add_count: number;
+  remaining_adds: number;
+  previous_stop_loss: number | null;
+  new_stop_loss: number;
+  stop_loss_shift_note: string;
+}
+
 export interface Position {
   id: number;
   stock_code: string;
   stock_name: string;
   market: string;
   buy_price: number;
+  initial_price?: number | null;
+  add_count?: number;
+  highest_price?: number | null;
   quantity: number;
   buy_date: string;
   stop_loss: number | null;
   take_profit: number | null;
+  trailing_stop_price?: number | null;
+  effective_stop_loss?: number | null;
+  add_position_signal?: HoldingAddSignal | null;
   status: string;
   sell_price?: number | null;
   sell_date?: string | null;
@@ -108,11 +164,15 @@ export interface PositionSummary {
   total_capital: number;
   cash_pct: number | null;
   usd_cny_rate?: number;
+  currency?: 'USD' | 'CNY' | string;
   warnings: PositionWarning[];
 }
 
 export interface SellResponse {
   message: string;
+  partial?: boolean;
+  sold_quantity?: number;
+  remaining_quantity?: number;
   realized_pnl: number;
   realized_pnl_pct: number;
   holding_days: number;

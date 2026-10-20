@@ -97,12 +97,14 @@ class BacktestService:
                      commission_per_trade: float = 1.0,
                      trailing_stop: bool = False,
                      staged_entry: bool = False,
+                     slippage_bps: float = 0.0,
                      params: Optional[Dict] = None) -> Dict:
         """
         运行策略回测
 
         period: 数据区间 1y/3y/5y（A股走东方财富/腾讯前复权日K，基准为沪深300 000300.SS）
         commission_per_trade: 每笔交易手续费（买入/卖出各收一次，默认$1）
+        slippage_bps: 单边滑点基点（1 bps = 0.01%，默认 0.0）
         params: 可选策略自定义参数（如寻优得到的最优 tp/sl 或 fast/slow）
         """
         df = self.stock_service.get_stock_data(stock_code, market, period=period)
@@ -126,12 +128,17 @@ class BacktestService:
             extra_params['trailing_stop'] = True
         if staged_entry:
             extra_params['staged_entry'] = True
+        if slippage_bps and slippage_bps > 0:
+            extra_params['slippage_bps'] = float(slippage_bps)
         result = self._execute_backtest(
             df=df, strategy=strategy, stock_code=stock_code,
             initial_capital=initial_capital, period=period,
             commission_per_trade=commission_per_trade,
             params=extra_params if extra_params else None,
         )
+        result['trailing_stop'] = bool(trailing_stop)
+        result['staged_entry'] = bool(staged_entry)
+        result['slippage_bps'] = float(slippage_bps or 0.0)
         bench_info = self._compute_index_benchmark(df, market, period, start=50)
         result['benchmark_code'] = bench_info['benchmark_code']
         result['benchmark_return'] = bench_info['benchmark_return']
@@ -212,6 +219,7 @@ class BacktestService:
         sl = abs(float(params.get('sl', 0.08)))
         use_trailing = bool(params.get('trailing_stop', False))
         use_staged = bool(params.get('staged_entry', False))
+        slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
         trades: List[Dict] = []
         equity_curve: List[Tuple[str, float]] = []
         capital = initial_capital
@@ -235,7 +243,7 @@ class BacktestService:
                     buy_level = prev_close - 0.5 * price_range
                     # 当日最低价触及买入位 → 成交于 min(开盘价, 买入位)
                     if current['Low'] <= buy_level:
-                        fill_price = min(current['Open'], buy_level)
+                        fill_price = min(current['Open'], buy_level) * (1.0 + slip_rate)
                         alloc_ratio = 0.50 if use_staged else 0.95
                         shares = int(capital * alloc_ratio / fill_price)
                         if shares > 0:
@@ -256,7 +264,7 @@ class BacktestService:
                 # 分批补仓：较首仓回撤5%时动用剩余资金补仓一次，摊低均价
                 add_trigger = buy_price * 0.95
                 if current['Low'] <= add_trigger:
-                    fill_price = min(current['Open'], add_trigger)
+                    fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
                     add_shares = int((capital * 0.90) / fill_price)
                     if add_shares > 0:
                         total_cost = position * buy_price + add_shares * fill_price
@@ -280,9 +288,9 @@ class BacktestService:
                 tp_level = buy_price * (1 + tp)
                 sell_price = None
                 if current['Low'] <= stop_level:
-                    sell_price = min(current['Open'], stop_level)   # 跳空低开按更差的开盘价
+                    sell_price = min(current['Open'], stop_level) * (1.0 - slip_rate)   # 跳空低开按更差的开盘价
                 elif current['High'] >= tp_level:
-                    sell_price = max(current['Open'], tp_level)     # 跳空高开按更好的开盘价
+                    sell_price = max(current['Open'], tp_level) * (1.0 - slip_rate)     # 跳空高开按更好的开盘价
                 highest_since_entry = max(highest_since_entry, float(current['High']))
                 if sell_price is not None:
                     profit_pct = (sell_price - buy_price) / buy_price
@@ -310,18 +318,23 @@ class BacktestService:
                             start: int = 50) -> Tuple[List[Dict], List[Tuple[str, float]]]:
         """
         非线性策略回测（超卖反弹）
-        买入：前一日RSI<30 或 当日最低价触及前一日布林带下轨
-        卖出：盘中触及+tp止盈位/-sl止损位即离场（挂单语义：按触发价成交，跳空按开盘价；params={"tp":0.46,"sl":0.08}，均用正数表示幅度，默认与历史硬编码一致）
+        买入：前一日RSI<30 或 当日最低价触及前一日布林带下轨（支持分批金字塔建仓 staged_entry）
+        卖出：盘中触及+tp止盈位/-sl止损位即离场（支持移动止盈保本 trailing_stop）
         每笔买卖各收手续费 commission
         """
         params = params or {}
         tp = abs(float(params.get('tp', 0.46)))
         sl = abs(float(params.get('sl', 0.08)))
+        use_trailing = bool(params.get('trailing_stop', False))
+        use_staged = bool(params.get('staged_entry', False))
+        slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
         trades: List[Dict] = []
         equity_curve: List[Tuple[str, float]] = []
         capital = initial_capital
         position = 0
         buy_price = 0.0
+        highest_since_entry = 0.0
+        added_once = False
 
         for i in range(start, len(df)):
             current = df.iloc[i]
@@ -329,7 +342,7 @@ class BacktestService:
             current_price = current['Close']
             bought_this_bar = False  # 入场bar不判卖出：盘中先后顺序不可知，从次根bar起挂单生效
 
-            # --- 买入 ---
+            # --- 买入（支持一次性建仓或分批金字塔建仓）---
             if position == 0:
                 rsi_prev = prev.get('RSI')
                 bb_lower_prev = prev.get('BB_Lower')
@@ -344,10 +357,14 @@ class BacktestService:
                     fill_price = min(current['Open'], bb_lower_prev)
 
                 if signal and pd.notna(fill_price):
-                    shares = int(capital * 0.95 / fill_price)
+                    fill_price = fill_price * (1.0 + slip_rate)
+                    alloc_ratio = 0.50 if use_staged else 0.95
+                    shares = int(capital * alloc_ratio / fill_price)
                     if shares > 0:
                         position = shares
                         buy_price = fill_price
+                        highest_since_entry = float(current['High'])
+                        added_once = False
                         capital -= shares * fill_price + commission
                         bought_this_bar = True
                         trades.append({
@@ -357,16 +374,37 @@ class BacktestService:
                             'shares': shares,
                             'fee': commission
                         })
+            elif use_staged and not added_once and position > 0:
+                add_trigger = buy_price * 0.95
+                if current['Low'] <= add_trigger:
+                    fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
+                    add_shares = int((capital * 0.90) / fill_price)
+                    if add_shares > 0:
+                        total_cost = position * buy_price + add_shares * fill_price
+                        position += add_shares
+                        buy_price = total_cost / position
+                        added_once = True
+                        capital -= add_shares * fill_price + commission
+                        trades.append({
+                            'date': df.index[i].strftime('%Y-%m-%d'),
+                            'action': 'buy',
+                            'price': round(fill_price, 2),
+                            'shares': add_shares,
+                            'fee': commission
+                        })
 
             # --- 卖出（盘中路径判定，预挂单语义；同日双触发保守按止损优先）---
             if position > 0 and not bought_this_bar:
                 stop_level = buy_price * (1 - sl)
+                if use_trailing:
+                    stop_level = compute_trailing_stop(buy_price, highest_since_entry, stop_level)
                 tp_level = buy_price * (1 + tp)
                 sell_price = None
                 if current['Low'] <= stop_level:
-                    sell_price = min(current['Open'], stop_level)   # 跳空低开按更差的开盘价
+                    sell_price = min(current['Open'], stop_level) * (1.0 - slip_rate)   # 跳空低开按更差的开盘价
                 elif current['High'] >= tp_level:
-                    sell_price = max(current['Open'], tp_level)     # 跳空高开按更好的开盘价
+                    sell_price = max(current['Open'], tp_level) * (1.0 - slip_rate)     # 跳空高开按更好的开盘价
+                highest_since_entry = max(highest_since_entry, float(current['High']))
                 if sell_price is not None:
                     profit_pct = (sell_price - buy_price) / buy_price
                     capital += position * sell_price - commission
@@ -391,12 +429,15 @@ class BacktestService:
                            commission: float = 1.0, params: Optional[Dict] = None,
                            start: int = 50) -> Tuple[List[Dict], List[Tuple[str, float]]]:
         """
-        双均线交叉策略：快线上穿慢线金叉买入，下穿死叉卖出（每笔买卖各收手续费）
+        双均线交叉策略：快线上穿慢线金叉买入，下穿死叉卖出（支持 trailing_stop 与 staged_entry）
         params={"fast":20,"slow":50}；非默认参数时在df副本上现算均线，避免污染缓存列
         """
         params = params or {}
         fast = int(params.get('fast', 20))
         slow = int(params.get('slow', 50))
+        use_trailing = bool(params.get('trailing_stop', False))
+        use_staged = bool(params.get('staged_entry', False))
+        slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
         if (fast, slow) != (20, 50):
             df = df.copy()
             df['MA20'] = df['Close'].rolling(fast).mean()
@@ -407,11 +448,14 @@ class BacktestService:
         capital = initial_capital
         position = 0
         buy_price = 0.0
+        highest_since_entry = 0.0
+        added_once = False
 
         for i in range(start, len(df)):
             current = df.iloc[i]
             prev = df.iloc[i - 1]
             current_price = current['Close']
+            bought_this_bar = False
 
             ma20 = current.get('MA20')
             ma50 = current.get('MA50')
@@ -421,11 +465,15 @@ class BacktestService:
             if all(pd.notna(v) for v in [ma20, ma50, prev_ma20, prev_ma50]):
                 # 金叉买入（均线含当日收盘、收盘后才能确认 → 按当日收盘价成交，尾盘单可实现）
                 if prev_ma20 <= prev_ma50 and ma20 > ma50 and position == 0:
-                    fill_price = current_price
-                    shares = int(capital * 0.95 / fill_price)
+                    fill_price = current_price * (1.0 + slip_rate)
+                    alloc_ratio = 0.50 if use_staged else 0.95
+                    shares = int(capital * alloc_ratio / fill_price)
                     if shares > 0:
                         position = shares
                         buy_price = fill_price
+                        highest_since_entry = float(current['High'])
+                        added_once = False
+                        bought_this_bar = True
                         capital -= shares * fill_price + commission
                         trades.append({
                             'date': df.index[i].strftime('%Y-%m-%d'),
@@ -434,19 +482,47 @@ class BacktestService:
                             'shares': shares,
                             'fee': commission
                         })
-                # 死叉卖出
-                elif prev_ma20 >= prev_ma50 and ma20 < ma50 and position > 0:
-                    capital += position * current_price - commission
-                    profit_pct = (current_price - buy_price) / buy_price
-                    trades.append({
-                        'date': df.index[i].strftime('%Y-%m-%d'),
-                        'action': 'sell',
-                        'price': round(current_price, 2),
-                        'shares': position,
-                        'profit_pct': round(profit_pct, 4),
-                        'fee': commission
-                    })
-                    position = 0
+                elif use_staged and not added_once and position > 0 and not (prev_ma20 >= prev_ma50 and ma20 < ma50):
+                    add_trigger = buy_price * 0.95
+                    if current['Low'] <= add_trigger:
+                        fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
+                        add_shares = int((capital * 0.90) / fill_price)
+                        if add_shares > 0:
+                            total_cost = position * buy_price + add_shares * fill_price
+                            position += add_shares
+                            buy_price = total_cost / position
+                            added_once = True
+                            capital -= add_shares * fill_price + commission
+                            trades.append({
+                                'date': df.index[i].strftime('%Y-%m-%d'),
+                                'action': 'buy',
+                                'price': round(fill_price, 2),
+                                'shares': add_shares,
+                                'fee': commission
+                            })
+
+                # 移动止盈保本或死叉卖出
+                if position > 0 and not bought_this_bar:
+                    sell_price = None
+                    if use_trailing:
+                        trail_stop = compute_trailing_stop(buy_price, highest_since_entry, buy_price * 0.92)
+                        if current['Low'] <= trail_stop:
+                            sell_price = min(current['Open'], trail_stop) * (1.0 - slip_rate)
+                    if sell_price is None and prev_ma20 >= prev_ma50 and ma20 < ma50:
+                        sell_price = current_price * (1.0 - slip_rate)
+                    highest_since_entry = max(highest_since_entry, float(current['High']))
+                    if sell_price is not None:
+                        capital += position * sell_price - commission
+                        profit_pct = (sell_price - buy_price) / buy_price
+                        trades.append({
+                            'date': df.index[i].strftime('%Y-%m-%d'),
+                            'action': 'sell',
+                            'price': round(sell_price, 2),
+                            'shares': position,
+                            'profit_pct': round(profit_pct, 4),
+                            'fee': commission
+                        })
+                        position = 0
 
             equity_curve.append((
                 df.index[i].strftime('%Y-%m-%d'),
@@ -459,13 +535,16 @@ class BacktestService:
                        commission: float = 1.0, params: Optional[Dict] = None,
                        start: int = 50) -> Tuple[List[Dict], List[Tuple[str, float]]]:
         """
-        MACD金叉死叉策略（每笔买卖各收手续费）
+        MACD金叉死叉策略（支持 trailing_stop 与 staged_entry）
         params={"fast":12,"slow":26,"signal":9}；非默认参数时在df副本上现算EMA差与信号线
         """
         params = params or {}
         fast = int(params.get('fast', 12))
         slow = int(params.get('slow', 26))
         signal_period = int(params.get('signal', 9))
+        use_trailing = bool(params.get('trailing_stop', False))
+        use_staged = bool(params.get('staged_entry', False))
+        slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
         if (fast, slow, signal_period) != (12, 26, 9):
             df = df.copy()
             exp_fast = df['Close'].ewm(span=fast, adjust=False).mean()
@@ -478,11 +557,14 @@ class BacktestService:
         capital = initial_capital
         position = 0
         buy_price = 0.0
+        highest_since_entry = 0.0
+        added_once = False
 
         for i in range(start, len(df)):
             current = df.iloc[i]
             prev = df.iloc[i - 1]
             current_price = current['Close']
+            bought_this_bar = False
 
             macd = current.get('MACD')
             signal = current.get('MACD_Signal')
@@ -492,11 +574,15 @@ class BacktestService:
             if all(pd.notna(v) for v in [macd, signal, prev_macd, prev_signal]):
                 # 金叉买入（MACD含当日收盘、收盘后才能确认 → 按当日收盘价成交，尾盘单可实现）
                 if prev_macd <= prev_signal and macd > signal and position == 0:
-                    fill_price = current_price
-                    shares = int(capital * 0.95 / fill_price)
+                    fill_price = current_price * (1.0 + slip_rate)
+                    alloc_ratio = 0.50 if use_staged else 0.95
+                    shares = int(capital * alloc_ratio / fill_price)
                     if shares > 0:
                         position = shares
                         buy_price = fill_price
+                        highest_since_entry = float(current['High'])
+                        added_once = False
+                        bought_this_bar = True
                         capital -= shares * fill_price + commission
                         trades.append({
                             'date': df.index[i].strftime('%Y-%m-%d'),
@@ -505,19 +591,47 @@ class BacktestService:
                             'shares': shares,
                             'fee': commission
                         })
-                # 死叉卖出
-                elif prev_macd >= prev_signal and macd < signal and position > 0:
-                    capital += position * current_price - commission
-                    profit_pct = (current_price - buy_price) / buy_price
-                    trades.append({
-                        'date': df.index[i].strftime('%Y-%m-%d'),
-                        'action': 'sell',
-                        'price': round(current_price, 2),
-                        'shares': position,
-                        'profit_pct': round(profit_pct, 4),
-                        'fee': commission
-                    })
-                    position = 0
+                elif use_staged and not added_once and position > 0 and not (prev_macd >= prev_signal and macd < signal):
+                    add_trigger = buy_price * 0.95
+                    if current['Low'] <= add_trigger:
+                        fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
+                        add_shares = int((capital * 0.90) / fill_price)
+                        if add_shares > 0:
+                            total_cost = position * buy_price + add_shares * fill_price
+                            position += add_shares
+                            buy_price = total_cost / position
+                            added_once = True
+                            capital -= add_shares * fill_price + commission
+                            trades.append({
+                                'date': df.index[i].strftime('%Y-%m-%d'),
+                                'action': 'buy',
+                                'price': round(fill_price, 2),
+                                'shares': add_shares,
+                                'fee': commission
+                            })
+
+                # 移动止盈保本或死叉卖出
+                if position > 0 and not bought_this_bar:
+                    sell_price = None
+                    if use_trailing:
+                        trail_stop = compute_trailing_stop(buy_price, highest_since_entry, buy_price * 0.92)
+                        if current['Low'] <= trail_stop:
+                            sell_price = min(current['Open'], trail_stop) * (1.0 - slip_rate)
+                    if sell_price is None and prev_macd >= prev_signal and macd < signal:
+                        sell_price = current_price * (1.0 - slip_rate)
+                    highest_since_entry = max(highest_since_entry, float(current['High']))
+                    if sell_price is not None:
+                        capital += position * sell_price - commission
+                        profit_pct = (sell_price - buy_price) / buy_price
+                        trades.append({
+                            'date': df.index[i].strftime('%Y-%m-%d'),
+                            'action': 'sell',
+                            'price': round(sell_price, 2),
+                            'shares': position,
+                            'profit_pct': round(profit_pct, 4),
+                            'fee': commission
+                        })
+                        position = 0
 
             equity_curve.append((
                 df.index[i].strftime('%Y-%m-%d'),
@@ -652,7 +766,8 @@ class BacktestService:
                     initial_capital: float = 100000,
                     commission_per_trade: float = 1.0,
                     trailing_stop: bool = False,
-                    staged_entry: bool = False) -> Dict:
+                    staged_entry: bool = False,
+                    slippage_bps: float = 0.0) -> Dict:
         """
         一键对比4个策略 + 买入持有基准。
         数据只拉取一次，4个策略在同一份数据上回测，保证可比性。
@@ -678,6 +793,8 @@ class BacktestService:
             extra_params['trailing_stop'] = True
         if staged_entry:
             extra_params['staged_entry'] = True
+        if slippage_bps and slippage_bps > 0:
+            extra_params['slippage_bps'] = float(slippage_bps)
 
         strategies: Dict[str, Dict] = {}
         comparison: List[Dict] = []

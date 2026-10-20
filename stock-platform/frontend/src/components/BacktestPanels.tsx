@@ -1,12 +1,12 @@
 // 回测页三面板：对比 / 参数寻优 / Walk-Forward。
 // 自包含设计——各自持有结果状态与请求逻辑，只依赖父组件传入的股票代码与主表单参数，
 // 消除此前"寻优/WF 静默继承顶部表单"的隐式耦合（参数经 getParams 显式传入并回显）。
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, Select, Button, InputNumber, Table, Tag, Space, Descriptions, Alert, message } from 'antd';
 import { AimOutlined, PlayCircleOutlined, RocketOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
-import { backtestApi } from '../services/api';
+import { backtestApi, errDetail } from '../services/api';
 import type { CompareResult, OptimizeResult, OptimizeRow, Strategy, WFSegment, WFResult } from '../types/api';
 import { colors } from '../theme/tokens';
 import { METRIC_LABEL, STRATEGY_COLORS, fmtParams, periodLabel } from '../utils/backtestFormat';
@@ -140,8 +140,14 @@ interface RunPanelProps {
 // 🎯 参数网格寻优面板
 export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, getParams, onApplyBestParams }) => {
   const [optStrategy, setOptStrategy] = useState('linear');
+  const [optMetric, setOptMetric] = useState<'sharpe' | 'total_return' | 'annual_return'>('sharpe');
   const [optResult, setOptResult] = useState<OptimizeResult | null>(null);
   const [optLoading, setOptLoading] = useState(false);
+
+  // 切换股票时自动清空上一只股票的寻优结果，防混排
+  useEffect(() => {
+    setOptResult(null);
+  }, [stockCode]);
 
   const handleRunOptimize = async () => {
     if (!stockCode) {
@@ -157,11 +163,12 @@ export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, 
         period: params.period || '1y',
         initial_capital: params.initial_capital,
         commission_per_trade: params.commission_per_trade ?? 1.0,
+        metric: optMetric,
       });
       setOptResult(response.data);
       message.success('寻优完成');
-    } catch {
-      message.error('参数寻优失败');
+    } catch (e) {
+      message.error(errDetail(e, '参数寻优失败'));
     } finally {
       setOptLoading(false);
     }
@@ -238,13 +245,23 @@ export const OptimizePanel: React.FC<RunPanelProps> = ({ stockCode, strategies, 
   return (
     <Card title={`🎯 参数寻优${optResult ? ` · ${optResult.stock_code} · ${periodLabel(optResult.period)} · 资金$${(optResult.initial_capital ?? 0).toLocaleString()}` : ''}`} style={{ marginTop: 16 }}>
       <Space wrap style={{ marginBottom: 16 }}>
-        <Select value={optStrategy} onChange={setOptStrategy} style={{ width: 240 }} optionLabelProp="title">
+        <Select value={optStrategy} onChange={setOptStrategy} style={{ width: 220 }} optionLabelProp="title">
           {strategies.map(s => (
             <Select.Option key={s.id} value={s.id} title={s.name}>
               {s.name} - {s.description}
             </Select.Option>
           ))}
         </Select>
+        <Select
+          value={optMetric}
+          onChange={setOptMetric}
+          style={{ width: 155 }}
+          options={[
+            { value: 'sharpe', label: '目标：夏普比率' },
+            { value: 'total_return', label: '目标：总收益率' },
+            { value: 'annual_return', label: '目标：年化收益' },
+          ]}
+        />
         <Button
           type="primary"
           ghost
@@ -310,6 +327,11 @@ export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategie
   const [wfResult, setWfResult] = useState<WFResult | null>(null);
   const [wfLoading, setWfLoading] = useState(false);
 
+  // 切换股票时自动清空上一只股票的 Walk-Forward 结果，防混排
+  useEffect(() => {
+    setWfResult(null);
+  }, [stockCode]);
+
   const handleRunWalkForward = async () => {
     if (!stockCode) {
       message.warning('请先选择股票');
@@ -328,8 +350,8 @@ export const WalkForwardPanel: React.FC<RunPanelProps> = ({ stockCode, strategie
       });
       setWfResult(response.data);
       message.success('Walk-Forward验证完成');
-    } catch {
-      message.error('Walk-Forward验证失败');
+    } catch (e) {
+      message.error(errDetail(e, 'Walk-Forward验证失败'));
     } finally {
       setWfLoading(false);
     }

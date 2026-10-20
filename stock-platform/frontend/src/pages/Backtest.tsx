@@ -86,6 +86,7 @@ const Backtest: React.FC = () => {
         end_date: values.date_range?.[1]?.format('YYYY-MM-DD'),
         initial_capital: values.initial_capital,
         commission_per_trade: values.commission_per_trade ?? 1.0,
+        slippage_bps: values.slippage_bps ?? 0,
         trailing_stop: !!values.trailing_stop,
         staged_entry: !!values.staged_entry,
         params: customParams,
@@ -120,6 +121,7 @@ const Backtest: React.FC = () => {
         period: values.period || '1y',
         initial_capital: values.initial_capital || 100000,
         commission_per_trade: values.commission_per_trade ?? 1.0,
+        slippage_bps: values.slippage_bps ?? 0,
         trailing_stop: !!values.trailing_stop,
         staged_entry: !!values.staged_entry,
       });
@@ -277,7 +279,8 @@ const Backtest: React.FC = () => {
                 strategy: 'linear',
                 period: '1y',
                 initial_capital: 100000,
-                commission_per_trade: 1.0
+                commission_per_trade: 1.0,
+                slippage_bps: 0
               }}
             >
               <Row gutter={16}>
@@ -362,10 +365,10 @@ const Backtest: React.FC = () => {
                     />
                   </Form.Item>
                 </Col>
-                <Col xs={24} md={6}>
+                <Col xs={12} md={3}>
                   <Form.Item
                     name="commission_per_trade"
-                    label="单笔手续费 ($)"
+                    label="手续费($)"
                     tooltip="买卖每笔扣除的固定交易佣金（默认 $1/笔）"
                   >
                     <InputNumber<number>
@@ -374,6 +377,21 @@ const Backtest: React.FC = () => {
                       max={100}
                       step={0.5}
                       precision={2}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={3}>
+                  <Form.Item
+                    name="slippage_bps"
+                    label="滑点(bps)"
+                    tooltip="单边成交滑点损耗（基点，10 bps = 0.10%，0表示理想成交）"
+                  >
+                    <InputNumber<number>
+                      style={{ width: '100%' }}
+                      min={0}
+                      max={200}
+                      step={5}
+                      precision={0}
                     />
                   </Form.Item>
                 </Col>

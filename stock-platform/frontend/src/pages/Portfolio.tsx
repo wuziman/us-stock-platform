@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Button, Modal, Form, Input, InputNumber, DatePicker, Tag, Space, Statistic, Row, Col, message, Popconfirm, Alert, Tabs, Tooltip } from 'antd';
-import { PlusOutlined, DeleteOutlined, EditOutlined, ThunderboltFilled, WarningFilled, SettingOutlined, DownloadOutlined } from '@ant-design/icons';
-import { portfolioApi } from '../services/api';
-import type { Position, PositionSummary } from '../types/api';
+import { Card, Table, Button, Modal, Form, Input, InputNumber, DatePicker, Tag, Space, Statistic, Row, Col, message, Popconfirm, Alert, Tabs, Tooltip, Switch, Select, Checkbox } from 'antd';
+import { PlusOutlined, DeleteOutlined, EditOutlined, ThunderboltFilled, WarningFilled, SettingOutlined, DownloadOutlined, RiseOutlined } from '@ant-design/icons';
+import { portfolioApi, errDetail } from '../services/api';
+import type { Position, PositionSummary, RiskSwitchesInfo } from '../types/api';
 import dayjs from 'dayjs';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
@@ -21,10 +21,21 @@ const Portfolio: React.FC = () => {
 
   const [sellModalVisible, setSellModalVisible] = useState(false);
   const [sellingPosition, setSellingPosition] = useState<Position | null>(null);
+  const [trancheModalVisible, setTrancheModalVisible] = useState(false);
+  const [tranchePosition, setTranchePosition] = useState<Position | null>(null);
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editingPosition, setEditingPosition] = useState<Position | null>(null);
   const [activeTab, setActiveTab] = useState<string>('holding');
+  const [riskSwitches, setRiskSwitches] = useState<RiskSwitchesInfo>({
+    sizing_mode: 'half_kelly_combined',
+    trailing_stop_enabled: true,
+    staged_add_enabled: true,
+    regime_linkage_enabled: true,
+  });
+  const [fxRateInput, setFxRateInput] = useState<number | null>(7.25);
+  const [fxSaving, setFxSaving] = useState(false);
   const [sellForm] = Form.useForm();
+  const [trancheForm] = Form.useForm();
   const [form] = Form.useForm();
 
   // ---------- 组合净值曲线与回撤 ----------
@@ -49,12 +60,20 @@ const Portfolio: React.FC = () => {
     else { failed.detail = true; failed.positions = true; }
     if (historyRes.status === 'fulfilled') setHistory(historyRes.value.data);
     else { failed.detail = true; failed.history = true; }
-    if (summaryRes.status === 'fulfilled') setSummary(summaryRes.value.data);
+    if (summaryRes.status === 'fulfilled') {
+      setSummary(summaryRes.value.data);
+      if (summaryRes.value.data?.usd_cny_rate) {
+        setFxRateInput(summaryRes.value.data.usd_cny_rate);
+      }
+    }
     else failed.stats = true;
     if (capitalRes.status === 'fulfilled') {
       const cap = capitalRes.value.data.total_capital || 0;
       setCapitalInput(cap || null);
     }
+    portfolioApi.getRiskSwitches()
+      .then((res) => setRiskSwitches(res.data))
+      .catch(() => {});
     setLoadErrors(failed);
     setLoading(false);
   };
@@ -70,13 +89,79 @@ const Portfolio: React.FC = () => {
       .catch(() => {});
   }, []);
 
-  // ---------- 止损止盈触发检测 ----------
-  const stopAlerts = positions.filter(p =>
-    p.stop_loss && p.current_price && p.current_price <= p.stop_loss
-  );
+  // ---------- 止损止盈触发检测（优先按移动保本有效止损线告警） ----------
+  const stopAlerts = positions.filter(p => {
+    const effStop = p.effective_stop_loss ?? p.stop_loss;
+    return effStop && p.current_price && p.current_price <= effStop;
+  });
   const tpAlerts = positions.filter(p =>
     p.take_profit && p.current_price && p.current_price >= p.take_profit
   );
+
+  const handleToggleSwitch = async (patch: Partial<RiskSwitchesInfo>) => {
+    try {
+      const res = await portfolioApi.updateRiskSwitches(patch);
+      setRiskSwitches(res.data);
+      message.success('实盘风控开关已更新');
+      fetchData();
+    } catch (e) {
+      message.error(errDetail(e, '更新风控开关失败'));
+    }
+  };
+
+  const handleSaveFxRate = async () => {
+    if (!fxRateInput || fxRateInput <= 0) {
+      message.warning('请输入有效汇率');
+      return;
+    }
+    setFxSaving(true);
+    try {
+      await portfolioApi.setUsdCnyRate(fxRateInput);
+      message.success('跨市场折算汇率已保存');
+      fetchData();
+    } catch (e) {
+      message.error(errDetail(e, '汇率保存失败'));
+    } finally {
+      setFxSaving(false);
+    }
+  };
+
+  // ---------- 阶梯补仓 ----------
+  const openTrancheModal = (record: Position) => {
+    setTranchePosition(record);
+    const sig = record.add_position_signal;
+    trancheForm.setFieldsValue({
+      add_price: record.current_price ?? sig?.next_trigger_price ?? Number((record.buy_price * 0.95).toFixed(2)),
+      add_quantity: sig?.suggested_add_shares && sig.suggested_add_shares > 0 ? sig.suggested_add_shares : Math.max(1, Math.floor(record.quantity / 2)),
+      stop_loss: undefined,
+      force: false,
+    });
+    setTrancheModalVisible(true);
+  };
+
+  const handleTrancheSubmit = async () => {
+    if (!tranchePosition || submitting) return;
+    setSubmitting(true);
+    try {
+      const values = await trancheForm.validateFields();
+      const res = await portfolioApi.addTranche(tranchePosition.id, {
+        add_price: values.add_price,
+        add_quantity: values.add_quantity,
+        stop_loss: values.stop_loss || undefined,
+        force: !!values.force,
+      });
+      message.success(
+        `${res.data.message}：新均价 ${currencySymbol(tranchePosition.market)}${res.data.new_buy_price}，总股数 ${res.data.new_quantity}，新止损 ${currencySymbol(tranchePosition.market)}${res.data.new_stop_loss}`
+      );
+      setTrancheModalVisible(false);
+      fetchData();
+    } catch (error) {
+      if ((error as { errorFields?: unknown }).errorFields) return;
+      message.error(errDetail(error, '阶梯补仓失败'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleSaveCapital = async () => {
     if (capitalInput === null || capitalInput <= 0) {
@@ -95,11 +180,12 @@ const Portfolio: React.FC = () => {
     }
   };
 
-  // ---------- 卖出 ----------
+  // ---------- 卖出（支持全仓清仓或分批止盈） ----------
   const openSellModal = (record: Position) => {
     setSellingPosition(record);
     sellForm.setFieldsValue({
       sell_price: record.current_price ?? record.buy_price,
+      sell_quantity: record.quantity,
       sell_date: dayjs()
     });
     setSellModalVisible(true);
@@ -112,15 +198,17 @@ const Portfolio: React.FC = () => {
       const values = await sellForm.validateFields();
       const res = await portfolioApi.sellPosition(sellingPosition.id, {
         sell_price: values.sell_price,
+        sell_quantity: values.sell_quantity,
         sell_date: values.sell_date.format('YYYY-MM-DD')
       });
       const sym = currencySymbol(sellingPosition.market);
-      message.success(`卖出成功！已实现盈亏 ${res.data.realized_pnl >= 0 ? '+' : ''}${sym}${res.data.realized_pnl}（${res.data.realized_pnl_pct}%），持有${res.data.holding_days}天`);
+      const actionLabel = res.data.partial ? `分批止盈 ${res.data.sold_quantity} 股（剩余 ${res.data.remaining_quantity} 股）` : '全仓卖出成功';
+      message.success(`${actionLabel}！已实现盈亏 ${res.data.realized_pnl >= 0 ? '+' : ''}${sym}${res.data.realized_pnl}（${res.data.realized_pnl_pct}%），持有${res.data.holding_days}天`);
       setSellModalVisible(false);
       fetchData();
     } catch (error) {
       if ((error as { errorFields?: unknown }).errorFields) return;
-      message.error('卖出失败');
+      message.error(errDetail(error, '卖出失败'));
     } finally {
       setSubmitting(false);
     }
@@ -268,34 +356,56 @@ const Portfolio: React.FC = () => {
       render: (d: number | null) => d !== null ? `${d}天` : '-'
     },
     {
-      title: '止损/止盈与补仓位', key: 'levels', width: 185,
+      title: '止损/止盈与阶梯补仓', key: 'levels', width: 225,
       render: (_: unknown, r: Position) => {
-        const nextAddPx = (r.buy_price * 0.95).toFixed(2);
+        const sym = currencySymbol(r.market);
+        const effStop = r.effective_stop_loss ?? r.stop_loss;
+        const hasTrailing = r.trailing_stop_price != null && r.stop_loss != null && r.trailing_stop_price > r.stop_loss;
+        const sig = r.add_position_signal;
+        const nextAddPx = sig?.next_trigger_price != null ? sig.next_trigger_price.toFixed(2) : (r.buy_price * 0.95).toFixed(2);
+        const addCount = r.add_count ?? sig?.add_count ?? 0;
+        const maxAdds = sig?.max_adds ?? 3;
         return (
           <Space size={4} wrap>
-            <Tag color={r.current_price && r.stop_loss && r.current_price <= r.stop_loss ? 'red' : 'default'}>
-              损{r.stop_loss ? `${currencySymbol(r.market)}${r.stop_loss}` : '-'}
-            </Tag>
-            <Tag color={r.current_price && r.take_profit && r.current_price >= r.take_profit ? 'green' : 'default'}>
-              盈{r.take_profit ? `${currencySymbol(r.market)}${r.take_profit}` : '-'}
-            </Tag>
-            <Tooltip title="按V2仓位方案：较买入均价回撤5%为第一档阶梯补仓位">
-              <Tag color="blue" style={{ fontSize: 11 }}>
-                补{currencySymbol(r.market)}{nextAddPx}
+            <Tooltip title={hasTrailing ? `移动保本已激活（原止损 ${sym}${r.stop_loss} -> 移动止损 ${sym}${r.trailing_stop_price}）` : '纪律止损线'}>
+              <Tag color={r.current_price && effStop && r.current_price <= effStop ? 'red' : hasTrailing ? 'gold' : 'default'}>
+                {hasTrailing ? '移损' : '损'}{effStop ? `${sym}${effStop}` : '-'}
               </Tag>
             </Tooltip>
+            <Tag color={r.current_price && r.take_profit && r.current_price >= r.take_profit ? 'green' : 'default'}>
+              盈{r.take_profit ? `${sym}${r.take_profit}` : '-'}
+            </Tag>
+            {addCount >= maxAdds ? (
+              <Tag color="default" style={{ fontSize: 11 }}>补满({addCount}/{maxAdds})</Tag>
+            ) : (
+              <Tooltip title={`首仓锚定 ${sym}${r.initial_price ?? r.buy_price} · 已补 ${addCount}/${maxAdds} 次${sig?.should_add ? ` · 已达触发线，建议补 ${sig.suggested_add_shares} 股` : ''}`}>
+                <Tag color={sig?.should_add ? 'volcano' : 'blue'} style={{ fontSize: 11 }}>
+                  {sig?.should_add ? '⚡可补' : '补'}{sym}{nextAddPx} ({addCount}/{maxAdds})
+                </Tag>
+              </Tooltip>
+            )}
           </Space>
         );
       }
     },
     {
-      title: '操作', key: 'action', width: 170,
+      title: '操作', key: 'action', width: 225,
       render: (_: unknown, r: Position) => (
-        <Space>
+        <Space size={4}>
           <Tooltip title="修改买入价/数量/止损止盈">
             <Button size="small" aria-label="修改持仓" icon={<EditOutlined />} onClick={() => handleEdit(r)} />
           </Tooltip>
-          <Tooltip title="卖出">
+          <Tooltip title={(r.add_count ?? 0) >= 3 ? '已满3次阶梯补仓上限' : '原行阶梯补仓（锚定首仓价 -5%/-10%/-15%）'}>
+            <Button
+              size="small"
+              icon={<RiseOutlined />}
+              disabled={(r.add_count ?? 0) >= 3}
+              onClick={() => openTrancheModal(r)}
+            >
+              补仓
+            </Button>
+          </Tooltip>
+          <Tooltip title="全仓卖出或分批止盈">
             <Button type="primary" size="small" danger icon={<ThunderboltFilled />}
                     onClick={() => openSellModal(r)}>
               卖出
@@ -418,19 +528,21 @@ const Portfolio: React.FC = () => {
       )}
 
       {/* ===== 总览统计（统计接口失败时整体隐藏，避免渲染成假零值） ===== */}
-      {!loadErrors.stats && (
+      {!loadErrors.stats && (() => {
+        const sumPrefix = summary?.currency === 'CNY' ? '¥' : '$';
+        return (
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col xs={12} md={8} lg={4}>
           <Card><Statistic title="持仓数量" value={summary?.total_positions || 0} /></Card>
         </Col>
         <Col xs={12} md={8} lg={5}>
-          <Card><Statistic title="持仓市值" value={summary?.total_value || 0} precision={2} prefix="$" /></Card>
+          <Card><Statistic title="持仓市值" value={summary?.total_value || 0} precision={2} prefix={sumPrefix} /></Card>
         </Col>
         <Col xs={12} md={8} lg={5}>
           <Card>
             <Statistic
               title="浮动盈亏"
-              value={summary?.total_profit || 0} precision={2} prefix="$"
+              value={summary?.total_profit || 0} precision={2} prefix={sumPrefix}
               valueStyle={{ color: (summary?.total_profit || 0) > 0 ? colors.profit : (summary?.total_profit || 0) < 0 ? colors.loss : colors.textSecondary }}
             />
           </Card>
@@ -459,7 +571,8 @@ const Portfolio: React.FC = () => {
           </Card>
         </Col>
       </Row>
-      )}
+        );
+      })()}
 
       {/* ===== 组合净值曲线（每日快照） ===== */}
       <Card
@@ -524,6 +637,65 @@ const Portfolio: React.FC = () => {
             暂无快照数据——后台监控任务会在交易时段自动记录每日组合市值，累积几天后这里会出现曲线
           </div>
         )}
+      </Card>
+
+      {/* ===== 实盘风控增强 4 开关 + 跨市场汇率配置 ===== */}
+      <Card size="small" style={{ marginBottom: 16 }} title="🛡️ 实盘风控引擎开关 & 跨市场汇率">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <Space size="middle" wrap>
+            <span>
+              算仓模式：
+              <Select
+                size="small"
+                value={riskSwitches.sizing_mode}
+                onChange={(val) => handleToggleSwitch({ sizing_mode: val })}
+                style={{ width: 175 }}
+                options={[
+                  { value: 'half_kelly_combined', label: '半凯利 + 2%风控 + 评分分档' },
+                  { value: 'fixed_2pct', label: '仅 2% 定额风险法则' },
+                ]}
+              />
+            </span>
+            <span>
+              <Switch
+                size="small"
+                checked={riskSwitches.trailing_stop_enabled}
+                onChange={(v) => handleToggleSwitch({ trailing_stop_enabled: v })}
+              />{' '}
+              +10%浮盈保本移动止损
+            </span>
+            <span>
+              <Switch
+                size="small"
+                checked={riskSwitches.staged_add_enabled}
+                onChange={(v) => handleToggleSwitch({ staged_add_enabled: v })}
+              />{' '}
+              三档阶梯补仓状态机
+            </span>
+            <span>
+              <Switch
+                size="small"
+                checked={riskSwitches.regime_linkage_enabled}
+                onChange={(v) => handleToggleSwitch({ regime_linkage_enabled: v })}
+              />{' '}
+              VIX/QQQ大盘风控联动
+            </span>
+          </Space>
+          <Space size="small">
+            <span style={{ fontSize: 12, color: colors.textSecondary }}>USD/CNY汇率：</span>
+            <InputNumber
+              size="small"
+              min={1}
+              max={20}
+              step={0.05}
+              precision={4}
+              value={fxRateInput}
+              onChange={(v) => setFxRateInput(v)}
+              style={{ width: 95 }}
+            />
+            <Button size="small" onClick={handleSaveFxRate} loading={fxSaving}>保存汇率</Button>
+          </Space>
+        </div>
       </Card>
 
       <Card
@@ -602,34 +774,109 @@ const Portfolio: React.FC = () => {
         />
       </Card>
 
-      {/* ===== 卖出弹窗 ===== */}
+      {/* ===== 卖出弹窗（支持全仓或分批止盈） ===== */}
       <Modal
-        title={`卖出 ${sellingPosition?.stock_name || ''} (${sellingPosition?.stock_code || ''})`}
+        title={`卖出 / 分批止盈 ${sellingPosition?.stock_name || ''} (${sellingPosition?.stock_code || ''})`}
         open={sellModalVisible}
         onOk={handleSellSubmit}
         confirmLoading={submitting}
         onCancel={() => setSellModalVisible(false)}
         okText="确认卖出"
         width="92%"
-        style={{ maxWidth: 520 }}
+        style={{ maxWidth: 540 }}
       >
         {sellingPosition && (
           <Alert
             type="info"
             style={{ marginBottom: 16 }}
-            message={`买入价${currencySymbol(sellingPosition.market)}${sellingPosition.buy_price} × ${sellingPosition.quantity}股 | 现价${currencySymbol(sellingPosition.market)}${sellingPosition.current_price ?? '-'} | 浮动盈亏${sellingPosition.profit_loss_pct ?? '-'}%`}
+            message={`买入均价 ${currencySymbol(sellingPosition.market)}${sellingPosition.buy_price} × 当前持仓 ${sellingPosition.quantity} 股 | 现价 ${currencySymbol(sellingPosition.market)}${sellingPosition.current_price ?? '-'} | 浮动盈亏 ${sellingPosition.profit_loss_pct ?? '-'}%`}
           />
         )}
         <Form form={sellForm} layout="vertical">
           <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="sell_price" label={`卖出价格 (${currencySymbol(sellingPosition?.market)})`} rules={[{ required: true, message: '请输入卖出价格' }]}>
+            <Col span={8}>
+              <Form.Item name="sell_price" label={`卖出价 (${currencySymbol(sellingPosition?.market)})`} rules={[{ required: true, message: '请输入卖出价格' }]}>
                 <InputNumber prefix={currencySymbol(sellingPosition?.market)} style={{ width: '100%' }} min={0} step={0.01} />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col span={8}>
+              <Form.Item
+                name="sell_quantity"
+                label="卖出股数"
+                rules={[{ required: true, message: '请输入卖出股数' }]}
+              >
+                <InputNumber style={{ width: '100%' }} min={1} max={sellingPosition?.quantity || undefined} precision={0} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
               <Form.Item name="sell_date" label="卖出日期" rules={[{ required: true, message: '请选择日期' }]}>
                 <DatePicker style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          {sellingPosition && sellingPosition.quantity >= 2 && (
+            <Space size="small">
+              <span style={{ fontSize: 12, color: colors.textSecondary }}>快捷分批：</span>
+              <Button size="small" onClick={() => sellForm.setFieldValue('sell_quantity', Math.max(1, Math.floor(sellingPosition.quantity / 3)))}>
+                1/3 仓 ({Math.max(1, Math.floor(sellingPosition.quantity / 3))}股)
+              </Button>
+              <Button size="small" onClick={() => sellForm.setFieldValue('sell_quantity', Math.max(1, Math.floor(sellingPosition.quantity / 2)))}>
+                半仓 ({Math.max(1, Math.floor(sellingPosition.quantity / 2))}股)
+              </Button>
+              <Button size="small" onClick={() => sellForm.setFieldValue('sell_quantity', sellingPosition.quantity)}>
+                全仓 ({sellingPosition.quantity}股)
+              </Button>
+            </Space>
+          )}
+        </Form>
+      </Modal>
+
+      {/* ===== 原行阶梯补仓弹窗 ===== */}
+      <Modal
+        title={`阶梯补仓 ${tranchePosition?.stock_name || ''} (${tranchePosition?.stock_code || ''})`}
+        open={trancheModalVisible}
+        onOk={handleTrancheSubmit}
+        confirmLoading={submitting}
+        onCancel={() => setTrancheModalVisible(false)}
+        okText="确认补仓"
+        width="92%"
+        style={{ maxWidth: 540 }}
+      >
+        {tranchePosition && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`首仓锚定价 ${currencySymbol(tranchePosition.market)}${tranchePosition.initial_price ?? tranchePosition.buy_price} | 当前均价 ${currencySymbol(tranchePosition.market)}${tranchePosition.buy_price} (${tranchePosition.quantity}股) | 已补仓 ${tranchePosition.add_count ?? 0}/3 次`}
+            description={
+              tranchePosition.add_position_signal?.next_trigger_price
+                ? `第 ${(tranchePosition.add_count ?? 0) + 1} 档补仓要求较首仓价下跌至少 ${tranchePosition.add_position_signal.next_tier_drop_pct}%（触发价 ≤ ${currencySymbol(tranchePosition.market)}${tranchePosition.add_position_signal.next_trigger_price}）。补仓后纪律止损将按新加权均价×0.92重算。`
+                : '补仓后将在原持仓行上原地更新加权均价与总股数。'
+            }
+          />
+        )}
+        <Form form={trancheForm} layout="vertical">
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="add_price" label="本次补仓买入价" rules={[{ required: true, message: '请输入补仓价格' }]}>
+                <InputNumber style={{ width: '100%' }} min={0.01} step={0.01} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="add_quantity" label="本次补仓股数" rules={[{ required: true, message: '请输入补仓股数' }]}>
+                <InputNumber style={{ width: '100%' }} min={1} precision={0} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="stop_loss" label="自定义补仓后止损位（留空则按新均价×0.92）">
+                <InputNumber style={{ width: '100%' }} min={0} step={0.01} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="force" valuePropName="checked" label=" ">
+                <Checkbox>强制补仓（忽略首仓跌幅门槛，仍受3次上限约束）</Checkbox>
               </Form.Item>
             </Col>
           </Row>
@@ -706,7 +953,7 @@ const Portfolio: React.FC = () => {
               <Button
                 size="small"
                 type="dashed"
-                onClick={() => {
+                onClick={async () => {
                   const bp = Number(form.getFieldValue('buy_price'));
                   if (!bp || bp <= 0) {
                     message.warning('请先填写买入价格');
@@ -714,17 +961,40 @@ const Portfolio: React.FC = () => {
                   }
                   const sl = Number(form.getFieldValue('stop_loss')) || Number((bp * 0.92).toFixed(2));
                   const cap = capitalInput && capitalInput > 0 ? capitalInput : 100000;
-                  const ps = calcPositionSize(cap, bp, sl);
-                  if (ps.recommendedShares > 0) {
-                    form.setFieldsValue({
-                      quantity: ps.recommendedShares,
+                  const code = String(form.getFieldValue('stock_code') || '').trim().toUpperCase();
+                  try {
+                    const res = await portfolioApi.getPositionSize({
+                      buy_price: bp,
                       stop_loss: sl,
+                      total_capital: cap,
+                      stock_code: code || undefined,
                     });
-                    message.success(`按总资金 $${cap.toLocaleString()} 的 2% 定额风险法则，建议建仓 ${ps.recommendedShares} 股（首仓可先入 ${ps.firstTrancheShares} 股）`);
+                    const d = res.data;
+                    if (d.kelly_warning) {
+                      message.warning(`${d.kelly_warning}（半凯利建议 0 股）`);
+                    }
+                    if (d.recommended_shares > 0) {
+                      form.setFieldsValue({
+                        quantity: d.recommended_shares,
+                        stop_loss: d.stop_loss,
+                      });
+                      const kNote = d.half_kelly_pct != null ? `，半凯利上限 ${d.half_kelly_pct}% (${d.kelly_source})` : '';
+                      const rNote = d.regime_scale != null && d.regime_scale < 1 ? `，大盘系数 ×${d.regime_scale}` : '';
+                      message.success(`科学算仓：建议建仓 ${d.recommended_shares} 股（首仓 ${d.first_tranche_shares} 股${kNote}${rNote}）`);
+                    }
+                  } catch {
+                    const ps = calcPositionSize(cap, bp, sl);
+                    if (ps.recommendedShares > 0) {
+                      form.setFieldsValue({
+                        quantity: ps.recommendedShares,
+                        stop_loss: sl,
+                      });
+                      message.success(`按总资金 $${cap.toLocaleString()} 的 2% 定额风险法则，建议建仓 ${ps.recommendedShares} 股（首仓可先入 ${ps.firstTrancheShares} 股）`);
+                    }
                   }
                 }}
               >
-                🧮 2%风控算仓位
+                🧮 科学算仓 (半凯利+2%风控)
               </Button>
             </Space>
           </div>

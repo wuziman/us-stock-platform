@@ -26,20 +26,19 @@ def cleanup_expired_analysis_history(
     max_age_days: int = ANALYSIS_HISTORY_RETENTION_DAYS,
     db: Optional[Session] = None,
 ) -> int:
-    """清理超过 max_age_days 天（默认 90 天）的陈旧 AnalysisHistory 记录"""
+    """清理超过 max_age_days 天（默认 90 天）的陈旧 AnalysisHistory 记录（SQL 条件批量删除，避免全表大 JSON 拉入内存）"""
     cutoff = now_beijing() - timedelta(days=max_age_days)
     own_session = db is None
     sess = db or SessionLocal()
     try:
-        rows = sess.query(AnalysisHistory).all()
-        removed = 0
-        for row in rows:
-            if row.created_at and row.created_at < cutoff:
-                sess.delete(row)
-                removed += 1
+        removed = (
+            sess.query(AnalysisHistory)
+            .filter(AnalysisHistory.created_at.isnot(None), AnalysisHistory.created_at < cutoff)
+            .delete(synchronize_session=False)
+        )
         if removed > 0:
             sess.commit()
-        return removed
+        return int(removed or 0)
     except Exception as e:
         sess.rollback()
         print(f"清理过期AnalysisHistory失败(忽略): {e}")

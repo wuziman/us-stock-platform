@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type {
+  AddTrancheResponse,
   AnalysisResult,
   BacktestResult,
   CompareResult,
@@ -15,6 +16,7 @@ import type {
   QuoteItem,
   ReportPreview,
   ReportSend,
+  RiskSwitchesInfo,
   SearchResult,
   SellResponse,
   Strategy,
@@ -92,6 +94,7 @@ export const backtestApi = {
     end_date?: string;
     initial_capital?: number;
     commission_per_trade?: number;
+    slippage_bps?: number;
     trailing_stop?: boolean;
     staged_entry?: boolean;
     params?: Record<string, number>;
@@ -103,6 +106,7 @@ export const backtestApi = {
     period?: string;
     initial_capital?: number;
     commission_per_trade?: number;
+    slippage_bps?: number;
     trailing_stop?: boolean;
     staged_entry?: boolean;
   }) => api.post<CompareResult>('/backtest/compare', data),
@@ -137,8 +141,23 @@ export const portfolioApi = {
   getHistory: () =>
     api.get<Position[]>('/portfolio/history'),
 
-  sellPosition: (id: number, data: { sell_price: number; sell_date: string }) =>
+  sellPosition: (id: number, data: { sell_price: number; sell_date: string; sell_quantity?: number }) =>
     api.post<SellResponse>(`/portfolio/${id}/sell`, data),
+
+  addTranche: (id: number, data: { add_price: number; add_quantity: number; stop_loss?: number; force?: boolean }) =>
+    api.post<AddTrancheResponse>(`/portfolio/${id}/add-tranche`, data),
+
+  getRiskSwitches: () =>
+    api.get<RiskSwitchesInfo>('/portfolio/settings/risk-switches'),
+
+  updateRiskSwitches: (data: Partial<RiskSwitchesInfo>) =>
+    api.put<RiskSwitchesInfo & { message: string }>('/portfolio/settings/risk-switches', data),
+
+  getUsdCnyRate: () =>
+    api.get<{ usd_cny_rate: number }>('/portfolio/settings/usd_cny_rate'),
+
+  setUsdCnyRate: (usd_cny_rate: number) =>
+    api.put<{ message: string; usd_cny_rate: number }>(`/portfolio/settings/usd_cny_rate?usd_cny_rate=${usd_cny_rate}`),
 
   addPosition: (data: {
     stock_code: string;
@@ -181,6 +200,11 @@ export const portfolioApi = {
     total_capital?: number;
     risk_per_trade?: number;
     win_rate?: number;
+    reward_risk_ratio?: number;
+    stock_code?: string;
+    strategy?: string;
+    total_score?: number;
+    sizing_mode?: string;
   }) => api.get<PositionSizeInfo>('/portfolio/position-size', { params }),
 };
 

@@ -8,7 +8,7 @@ import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
 import { stockApi, analysisApi, portfolioApi } from '../services/api';
 import { patternApi, SignalsResult } from '../services/patternApi';
-import { trackingApi, TrackingResult } from '../services/trackingApi';
+import { trackingApi, TrackingResult, WeightHealthReport } from '../services/trackingApi';
 import { colors } from '../theme/tokens';
 
 const { Search } = Input;
@@ -22,6 +22,7 @@ const Analysis: React.FC = () => {
   const [historyData, setHistoryData] = useState<KlineBar[]>([]);
   const [signals, setSignals] = useState<SignalsResult | null>(null);
   const [tracking, setTracking] = useState<TrackingResult | null>(null);
+  const [weightHealth, setWeightHealth] = useState<WeightHealthReport | null>(null);
   const [isInWatchlist, setIsInWatchlist] = useState(false);
   const [showMA, setShowMA] = useState(true);
   const [showBOLL, setShowBOLL] = useState(false);
@@ -63,11 +64,12 @@ const Analysis: React.FC = () => {
     setHistoryLoading(true);
     setHistoryError(null);
 
-    // 历史K线、技术信号、评分追踪并行拉取
-    const [historyRes, signalsRes, trackingRes] = await Promise.allSettled([
+    // 历史K线、技术信号、评分追踪、四维权重体检并行拉取
+    const [historyRes, signalsRes, trackingRes, whRes] = await Promise.allSettled([
       stockApi.getHistory(stock.code, stock.market, pd),
       patternApi.getSignals(stock.code, stock.market, pd),
       trackingApi.getTracking(stock.code),
+      trackingApi.getWeightHealth({ stock_code: stock.code, window_days: 90, forward_days: 20, mode: analysisMode }),
     ]);
     if (seq !== selectSeqRef.current) return; // 期间已切到其他股票，丢弃过期结果
     setHistoryLoading(false);
@@ -83,6 +85,11 @@ const Analysis: React.FC = () => {
     // 评分追踪：暂无记录(400)时静默忽略
     if (trackingRes.status === 'fulfilled') {
       setTracking(trackingRes.value.data);
+    }
+    if (whRes.status === 'fulfilled' && whRes.value.data?.sample_count > 0) {
+      setWeightHealth(whRes.value.data);
+    } else {
+      setWeightHealth(null);
     }
   };
 
@@ -100,6 +107,7 @@ const Analysis: React.FC = () => {
     setHistoryData([]);
     setSignals(null);
     setTracking(null);
+    setWeightHealth(null);
     setIsInWatchlist(false); // 切换股票时重置，避免残留上一只的"已关注"
     // 选中状态写入URL：刷新/分享不丢（replace避免历史堆积）
     setSearchParams({ code: stock.code, name: stock.name, market: stock.market }, { replace: true });
@@ -606,6 +614,51 @@ const Analysis: React.FC = () => {
             }
           ]}
         />
+
+        {weightHealth && weightHealth.sample_count > 0 && (
+          <>
+            <Divider style={{ margin: '12px 0 8px' }}>🩺 四维权重 90 天滚动体检报告</Divider>
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message={`裸泳维度点名：${weightHealth.swimming_naked_dimension.label}`}
+              description={weightHealth.diagnosis}
+            />
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              {Object.values(weightHealth.dimension_correlations || {}).map((dim) => (
+                <Tag
+                  key={dim.dimension}
+                  color={dim.status.includes('正相关') ? 'green' : dim.status.includes('负相关') ? 'red' : 'default'}
+                >
+                  {dim.label.split(' ')[0]} ({Math.round(dim.base_weight * 100)}%)：r={dim.correlation ?? '—'} · {dim.status}
+                </Tag>
+              ))}
+            </div>
+            <Table
+              size="small"
+              pagination={false}
+              rowKey={(r) => `${r.dimension}-${r.delta}`}
+              dataSource={weightHealth.perturbation_sensitivity || []}
+              columns={[
+                { title: '维度', dataIndex: 'label', render: (v: string) => v.split(' ')[0] },
+                { title: '权重扰动', dataIndex: 'delta', width: 75 },
+                {
+                  title: '高分组合收益变化',
+                  dataIndex: 'return_impact_pct',
+                  render: (v: number) => (
+                    <span style={{ color: v > 0 ? colors.success : v < 0 ? colors.error : colors.textSecondary, fontWeight: 600 }}>
+                      {v > 0 ? '+' : ''}{v}%
+                    </span>
+                  )
+                },
+              ]}
+            />
+            <div style={{ fontSize: 11, color: colors.textSecondary, marginTop: 4 }}>
+              *{weightHealth.policy_note}（高分基准收益：{weightHealth.base_portfolio_return_pct}%）
+            </div>
+          </>
+        )}
       </Card>
     );
   };

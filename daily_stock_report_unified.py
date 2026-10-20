@@ -247,19 +247,24 @@ def fetch_market_regime_and_circuit_breaker() -> dict:
         'advice': '量化策略正常运行，按计划挂单'
     }
     try:
-        # 获取 VIX
+        # 获取 VIX（过滤盘前 NaN 行）
         vix_ticker = yf.Ticker("^VIX")
         vix_hist = vix_ticker.history(period="5d")
-        if vix_hist is not None and not vix_hist.empty:
-            regime['vix'] = float(vix_hist['Close'].iloc[-1])
+        if vix_hist is not None and not vix_hist.empty and 'Close' in vix_hist.columns:
+            vix_clean = vix_hist.dropna(subset=['Close'])
+            if not vix_clean.empty:
+                regime['vix'] = float(vix_clean['Close'].iloc[-1])
 
-        # 获取 QQQ
+        # 获取 QQQ（过滤盘前 NaN 行）
         qqq_ticker = yf.Ticker("QQQ")
         qqq_hist = qqq_ticker.history(period="5d")
-        if qqq_hist is not None and len(qqq_hist) >= 2:
-            c1 = qqq_hist['Close'].iloc[-1]
-            c0 = qqq_hist['Close'].iloc[-2]
-            regime['qqq_change'] = float(((c1 - c0) / c0) * 100)
+        if qqq_hist is not None and not qqq_hist.empty and 'Close' in qqq_hist.columns:
+            qqq_clean = qqq_hist.dropna(subset=['Close'])
+            if len(qqq_clean) >= 2:
+                c1 = float(qqq_clean['Close'].iloc[-1])
+                c0 = float(qqq_clean['Close'].iloc[-2])
+                if c0 > 0:
+                    regime['qqq_change'] = float(((c1 - c0) / c0) * 100)
 
         vix = regime['vix']
         qqq_chg = regime['qqq_change']
