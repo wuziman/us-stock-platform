@@ -30,24 +30,17 @@ from ..services.alert_service import (
 )
 from ..services.portfolio_service import (
     ADD_TRANCHE_THRESHOLDS,
-    CASH_MAX_PCT,
-    CASH_MIN_PCT,
     DEFAULT_RISK_PER_TRADE,
-    EMPIRICAL_STOCK_PROFILES,
     MAX_ADD_TRANCHES,
-    MAX_SINGLE_POSITION_PCT,
     THEORETICAL_TARGET_STOP_RR,
-    _compute_holding_add_signal,
     _enrich_holding,
     _get_total_capital,
     _get_usd_cny_rate,
     _realized_pnl,
     _to_naive_dt,
     calculate_recommended_position,
-    clear_l2_kelly_cache,
     compute_portfolio_summary,
     consolidate_duplicate_holdings,
-    resolve_kelly_inputs,
 )
 from ..services.report_service import ReportService
 from ..services.stock_service import StockService

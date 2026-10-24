@@ -230,7 +230,6 @@ class TestFourDimWeightHealthReport:
         # 2. 构造 12 条 90 天内的真实评分记录：
         #    technical 与前向收益强正相关，event/news 正相关，macro 与前向收益负相关（在裸泳）
         dates = [f"2026-09-{d:02d}" for d in range(1, 13)]
-        closes_map = {d: 100.0 for d in dates}
         records = []
         # 模拟不同个股的当前价带来不同的前向收益
         kline_by_code = {}

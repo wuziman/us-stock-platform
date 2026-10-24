@@ -14,7 +14,7 @@ if str(_BACKEND_DIR) not in sys.path:
 _DB_DIR = Path(tempfile.mkdtemp(prefix="stock_platform_test_"))
 os.environ["STOCK_PLATFORM_DB"] = str(_DB_DIR / "test.db")
 
-from app.database import Base, engine
-from app import models, models_platform, models_tracking  # noqa: F401
+from app.database import Base, engine  # noqa: E402
+from app import models, models_platform, models_tracking  # noqa: E402, F401
 Base.metadata.create_all(bind=engine)
 

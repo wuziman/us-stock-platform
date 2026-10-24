@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
 from ..models_platform import WeeklyTop5Snapshot
-from ..utils.app_config import load_config
 from ..utils.indicators import (
     calculate_atr,
     calculate_bollinger_bands,

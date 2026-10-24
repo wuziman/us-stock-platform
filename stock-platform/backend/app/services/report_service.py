@@ -17,8 +17,6 @@ from typing import Dict, List, Optional
 import requests
 import pandas as pd
 
-from ..database import SessionLocal
-from ..models import Setting
 from .stock_service import StockService
 from .tech_score import calculate_tech_score
 from ..utils.indicators import calculate_all_indicators

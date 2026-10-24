@@ -7,6 +7,8 @@ from bisect import bisect_right
 from math import sqrt
 from typing import Dict, List, Optional
 
+from .analysis_service import DEFAULT_4D_WEIGHTS, DEFAULT_DIMENSION_WEIGHTS
+
 
 def _record_get(record, key):
     """兼容 dict 与 ORM 对象两种记录形态"""
@@ -182,8 +184,6 @@ def build_tracking(stock_code: str, db_rows: List, history_df=None) -> Dict:
 # ============================================
 # [第三批·第二段-4] 四维权重体检报告（3个月滚动窗口 + 各维相关性 + ±10% 权重扰动敏感度矩阵）
 # ============================================
-# 从 analysis_service 导入全仓库唯一四维权重真源，严禁在本模块重复手写字面量
-from .analysis_service import DEFAULT_4D_WEIGHTS, DEFAULT_DIMENSION_WEIGHTS
 DIMENSION_LABELS = {
     "technical": "技术面 (tech_score)",
     "news": "消息面 (news_score)",
