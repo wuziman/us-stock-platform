@@ -11,6 +11,10 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+_REPO_ROOT = _BACKEND_DIR.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 _DB_DIR = Path(tempfile.mkdtemp(prefix="stock_platform_test_"))
 os.environ["STOCK_PLATFORM_DB"] = str(_DB_DIR / "test.db")
 

@@ -39,6 +39,7 @@ from ..services.portfolio_service import (
     _realized_pnl,
     _to_naive_dt,
     calculate_recommended_position,
+    clear_l2_kelly_cache,  # noqa: F401
     compute_portfolio_summary,
     consolidate_duplicate_holdings,
 )
