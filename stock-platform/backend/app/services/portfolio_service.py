@@ -10,7 +10,6 @@
 
 import json
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -27,13 +26,10 @@ from ..services.backtest_service import BacktestService
 from ..utils.market import detect_market
 from ..utils.price_levels import STOP_PCT, compute_trailing_stop
 from ..utils.timezone import now_beijing, to_naive_beijing, today_beijing
+from .position_manager import PositionManager as UnifiedPositionManager
 
-# 接入仓库根目录的 position_manager.py（含评分分档与半凯利公式）
+# 定位仓库根目录（用于加载外部可选数据文件 data/stock_profiles.json）
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from position_manager import PositionManager as UnifiedPositionManager  # noqa: E402
 
 # 风控规则（来自CLAUDE.md）
 MAX_SINGLE_POSITION_PCT = 40.0   # 单只股票最大仓位40%

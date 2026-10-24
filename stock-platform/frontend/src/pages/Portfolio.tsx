@@ -464,7 +464,7 @@ const Portfolio: React.FC = () => {
             <div>
               {stopAlerts.map(a => (
                 <div key={a.id}>
-                  <b>{a.stock_name}({a.stock_code})</b>：现价{currencySymbol(a.market)}{a.current_price} 已跌破止损位{currencySymbol(a.market)}{a.stop_loss}
+                  <b>{a.stock_name}({a.stock_code})</b>：现价{currencySymbol(a.market)}{a.current_price} 已跌破止损位{currencySymbol(a.market)}{a.effective_stop_loss ?? a.stop_loss}
                   ，当前浮亏{a.profit_loss_pct}% —— 严格执行止损纪律！
                 </div>
               ))}

@@ -484,7 +484,7 @@ class TestBatch4Segment1Guards:
         assert "formatBacktestTooltipLine" in bt_txt
 
         port_txt = (fe_src / "pages" / "Portfolio.tsx").read_text(encoding="utf-8")
-        assert "买入价${currencySymbol(sellingPosition.market)}" in port_txt
+        assert "买入均价 ${currencySymbol(sellingPosition.market)}" in port_txt
         assert "resolvePositionsViewState" in port_txt
 
         an_txt = (fe_src / "pages" / "Analysis.tsx").read_text(encoding="utf-8")

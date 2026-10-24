@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { AnalysisResult, HistoryItem, KlineBar, SearchResult } from '../types/api';
 import { calcPositionSize, currencySymbol, fmtDist, fmtPx } from '../utils/format';
-import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber } from 'antd';
+import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber, Empty } from 'antd';
 import { SearchOutlined, StarOutlined, StarFilled, LineChartOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
@@ -834,6 +834,27 @@ const Analysis: React.FC = () => {
                 </div>
               )}
             </Card>
+
+            {!analysisResult && (
+              <Card style={{ marginTop: 16 }}>
+                <Empty
+                  description={
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>
+                        已加载 {selectedStock.name} ({selectedStock.code}) 实时K线与形态信号
+                      </div>
+                      <div style={{ color: colors.textSecondary, fontSize: 13, marginBottom: 16 }}>
+                        点击下方按钮，系统将执行四维度（技术面 / 消息舆情 / 宏观数据 / 事件驱动）深度投研并生成量化买卖点位
+                      </div>
+                    </div>
+                  }
+                >
+                  <Button type="primary" size="large" loading={loading} onClick={handleAnalyze}>
+                    立即执行四维深度分析
+                  </Button>
+                </Empty>
+              </Card>
+            )}
           </Col>
 
           <Col xs={24} lg={8}>

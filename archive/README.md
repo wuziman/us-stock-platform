@@ -33,3 +33,11 @@
 8. `legacy_backend_manual_tests/`（8 个早期手动 `print` 调试脚本 `test_*.py`）
    - **原位置**：`stock-platform/backend/test_*.py`
    - **归档原因**：早期无 `assert` 的手动联网打印脚本，现已由 `stock-platform/backend/tests/` 下基于 `pytest` 的 243 个自动化回归测试全面替代。
+
+9. `stock_analysis_v1_archived.py`
+   - **原位置**：仓库根目录 `utils/stock_analysis.py`（1081行 v1 旧实现）
+   - **归档原因**：全套四维分析服务已收敛至 `stock-platform/backend/app/services/analysis_service.py`，根目录 `utils/stock_analysis.py` 已转为轻量向后兼容垫片。
+
+10. `visualization_v1_archived.py`
+   - **原位置**：仓库根目录 `utils/visualization.py`
+   - **归档原因**：早期 Matplotlib 静态绘图模块，平台已全面升级为 React + ECharts 交互式图表系统，全仓库除自身外零引用。
