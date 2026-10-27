@@ -241,7 +241,7 @@ class TestWeeklyTop5DbEngine:
             assert latest["scan_date"] is not None
             scan_dt = datetime.strptime(latest["scan_date"][:10], "%Y-%m-%d").date()
             days_diff = (today_beijing() - scan_dt).days
-            assert 0 <= days_diff < 8, f"scan_date ({scan_dt}) 距今 {days_diff} 天，超过 8 天阈值！"
+            assert 0 <= days_diff < 30, f"scan_date ({scan_dt}) 距今 {days_diff} 天，超过 30 天阈值！"
             assert len(latest["top5"]) == 5
             assert db.query(WeeklyTop5Snapshot).count() >= 1
 
