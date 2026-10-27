@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from .stock_service import StockService
 from ..utils.indicators import calculate_all_indicators
 from ..utils.price_levels import compute_trailing_stop
+from ..utils.market import detect_market
 
 
 # 市场大盘指数基准（A股统一采用沪深300指数 000300.SS，替代旧版平安银行 000001.SZ）
@@ -165,8 +166,13 @@ class BacktestService:
         if strategy not in strategy_map:
             return {'error': f'未知策略: {strategy}'}
 
+        strategy_params = dict(params) if params else {}
+        is_cn = detect_market(stock_code) == "A" if stock_code else False
+        if 'lot_size' not in strategy_params:
+            strategy_params['lot_size'] = 100 if is_cn else 1
+
         trades, equity_curve = strategy_map[strategy](
-            df, initial_capital, commission_per_trade, params)
+            df, initial_capital, commission_per_trade, strategy_params)
         final_value = equity_curve[-1][1]
         total_return = (final_value - initial_capital) / initial_capital
 
@@ -220,6 +226,7 @@ class BacktestService:
         use_trailing = bool(params.get('trailing_stop', False))
         use_staged = bool(params.get('staged_entry', False))
         slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
+        lot_size = max(1, int(params.get('lot_size', 1)))
         trades: List[Dict] = []
         equity_curve: List[Tuple[str, float]] = []
         capital = initial_capital
@@ -246,6 +253,8 @@ class BacktestService:
                         fill_price = min(current['Open'], buy_level) * (1.0 + slip_rate)
                         alloc_ratio = 0.50 if use_staged else 0.95
                         shares = int(capital * alloc_ratio / fill_price)
+                        if lot_size > 1:
+                            shares = (shares // lot_size) * lot_size
                         if shares > 0:
                             position = shares
                             buy_price = fill_price
@@ -266,6 +275,8 @@ class BacktestService:
                 if current['Low'] <= add_trigger:
                     fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
                     add_shares = int((capital * 0.90) / fill_price)
+                    if lot_size > 1:
+                        add_shares = (add_shares // lot_size) * lot_size
                     if add_shares > 0:
                         total_cost = position * buy_price + add_shares * fill_price
                         position += add_shares
@@ -328,6 +339,7 @@ class BacktestService:
         use_trailing = bool(params.get('trailing_stop', False))
         use_staged = bool(params.get('staged_entry', False))
         slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
+        lot_size = max(1, int(params.get('lot_size', 1)))
         trades: List[Dict] = []
         equity_curve: List[Tuple[str, float]] = []
         capital = initial_capital
@@ -360,6 +372,8 @@ class BacktestService:
                     fill_price = fill_price * (1.0 + slip_rate)
                     alloc_ratio = 0.50 if use_staged else 0.95
                     shares = int(capital * alloc_ratio / fill_price)
+                    if lot_size > 1:
+                        shares = (shares // lot_size) * lot_size
                     if shares > 0:
                         position = shares
                         buy_price = fill_price
@@ -379,6 +393,8 @@ class BacktestService:
                 if current['Low'] <= add_trigger:
                     fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
                     add_shares = int((capital * 0.90) / fill_price)
+                    if lot_size > 1:
+                        add_shares = (add_shares // lot_size) * lot_size
                     if add_shares > 0:
                         total_cost = position * buy_price + add_shares * fill_price
                         position += add_shares
@@ -438,6 +454,7 @@ class BacktestService:
         use_trailing = bool(params.get('trailing_stop', False))
         use_staged = bool(params.get('staged_entry', False))
         slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
+        lot_size = max(1, int(params.get('lot_size', 1)))
         if (fast, slow) != (20, 50):
             df = df.copy()
             df['MA20'] = df['Close'].rolling(fast).mean()
@@ -468,6 +485,8 @@ class BacktestService:
                     fill_price = current_price * (1.0 + slip_rate)
                     alloc_ratio = 0.50 if use_staged else 0.95
                     shares = int(capital * alloc_ratio / fill_price)
+                    if lot_size > 1:
+                        shares = (shares // lot_size) * lot_size
                     if shares > 0:
                         position = shares
                         buy_price = fill_price
@@ -487,6 +506,8 @@ class BacktestService:
                     if current['Low'] <= add_trigger:
                         fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
                         add_shares = int((capital * 0.90) / fill_price)
+                        if lot_size > 1:
+                            add_shares = (add_shares // lot_size) * lot_size
                         if add_shares > 0:
                             total_cost = position * buy_price + add_shares * fill_price
                             position += add_shares
@@ -545,6 +566,7 @@ class BacktestService:
         use_trailing = bool(params.get('trailing_stop', False))
         use_staged = bool(params.get('staged_entry', False))
         slip_rate = max(0.0, float(params.get('slippage_bps', 0.0))) / 10000.0
+        lot_size = max(1, int(params.get('lot_size', 1)))
         if (fast, slow, signal_period) != (12, 26, 9):
             df = df.copy()
             exp_fast = df['Close'].ewm(span=fast, adjust=False).mean()
@@ -577,6 +599,8 @@ class BacktestService:
                     fill_price = current_price * (1.0 + slip_rate)
                     alloc_ratio = 0.50 if use_staged else 0.95
                     shares = int(capital * alloc_ratio / fill_price)
+                    if lot_size > 1:
+                        shares = (shares // lot_size) * lot_size
                     if shares > 0:
                         position = shares
                         buy_price = fill_price
@@ -596,6 +620,8 @@ class BacktestService:
                     if current['Low'] <= add_trigger:
                         fill_price = min(current['Open'], add_trigger) * (1.0 + slip_rate)
                         add_shares = int((capital * 0.90) / fill_price)
+                        if lot_size > 1:
+                            add_shares = (add_shares // lot_size) * lot_size
                         if add_shares > 0:
                             total_cost = position * buy_price + add_shares * fill_price
                             position += add_shares

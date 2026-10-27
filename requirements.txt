@@ -23,3 +23,8 @@ lxml>=4.9.0
 
 # 配置管理
 python-dotenv>=1.0.0
+
+# 平台服务与数据模型（Weekly Screener等桥接脚本依赖）
+sqlalchemy>=2.0.0
+pydantic>=2.0.0
+

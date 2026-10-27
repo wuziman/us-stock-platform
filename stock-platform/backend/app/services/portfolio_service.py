@@ -340,8 +340,21 @@ def calculate_recommended_position(
     else:
         shares = int(base_2pct_shares * eff_scale)
 
+    # A股按 100 股（1手）为最小交易单位向下取整
+    is_cn = detect_market(stock_code) == "A" if stock_code else False
+    lot_size = 100 if is_cn else 1
+    if lot_size > 1:
+        shares = (shares // lot_size) * lot_size
+        first_tranche_shares = (max(0, shares // 2) // lot_size) * lot_size
+    else:
+        first_tranche_shares = max(0, shares // 2)
+
     pos_value = round(shares * buy_price, 2)
     pos_pct = round(pos_value / eff_capital * 100, 2) if eff_capital > 0 else 0.0
+
+    lot_warning = None
+    if is_cn and shares == 0 and not negative_kelly:
+        lot_warning = "资金不足1手(100股)，建议增加资金或观望"
 
     return {
         'capital': round(eff_capital, 2),
@@ -350,15 +363,17 @@ def calculate_recommended_position(
         'risk_per_trade_pct': round(risk_per_trade * 100, 2),
         'max_loss_amount': round(shares * per_share_risk, 2),
         'recommended_shares': shares,
-        'risk_2pct_shares': base_2pct_shares,
-        'half_kelly_shares': half_kelly_shares,
-        'score_tier_shares': score_tier_shares,
+        'risk_2pct_shares': (base_2pct_shares // lot_size * lot_size) if lot_size > 1 else base_2pct_shares,
+        'half_kelly_shares': (half_kelly_shares // lot_size * lot_size) if lot_size > 1 and half_kelly_shares is not None else half_kelly_shares,
+        'score_tier_shares': (score_tier_shares // lot_size * lot_size) if lot_size > 1 and score_tier_shares is not None else score_tier_shares,
         'position_value': pos_value,
         'position_pct': pos_pct,
-        'first_tranche_shares': max(0, shares // 2),
+        'first_tranche_shares': first_tranche_shares,
         'add_price_1': round(buy_price * 0.95, 2),
         'add_price_2': round(buy_price * 0.90, 2),
         'add_price_3': round(buy_price * 0.85, 2),
+        'lot_size': lot_size,
+        'lot_warning': lot_warning,
         'capped_by_40pct': capped,
         'half_kelly_pct': half_kelly_pct,
         'win_rate_used': round(float(eff_wr), 2) if eff_wr is not None else None,
