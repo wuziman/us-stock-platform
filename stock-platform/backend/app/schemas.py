@@ -28,7 +28,7 @@ class WatchlistResponse(BaseModel):
 class AnalysisRequest(BaseModel):
     stock_code: str
     stock_name: str
-    mode: Literal["simple", "research"] = "simple"
+    mode: Literal["simple", "research", "adaptive"] = "simple"
 
 
 class EarningsRadar(BaseModel):
@@ -49,11 +49,13 @@ class MarketRegimeResponse(BaseModel):
 class AnalysisResponse(BaseModel):
     stock_code: str
     stock_name: str
+    market: str = "US"
     scores: Dict[str, float]
     recommendation: Dict[str, str]
     price_levels: Dict[str, Any]
     details: Dict[str, Any]
     earnings_radar: Optional[EarningsRadar] = None
+    regime_adaptive: Optional[Dict[str, Any]] = None
 
 
 # 持仓

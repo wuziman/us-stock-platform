@@ -252,6 +252,19 @@ export interface AnalysisResult {
     confidence: string;
   };
   earnings_radar?: EarningsRadar;
+  regime_adaptive?: {
+    regime: string;
+    mode_desc: string;
+    weights: {
+      technical: number;
+      news: number;
+      macro: number;
+      event: number;
+    };
+    adaptive_total_score: number;
+    static_total_score: number;
+    score_diff: number;
+  };
   price_levels: {
     current_price: number | null;
     atr?: number | null;

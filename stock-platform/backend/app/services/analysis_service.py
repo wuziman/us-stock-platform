@@ -177,6 +177,20 @@ DEFAULT_DIMENSION_WEIGHTS = {
         "macro": 0.25,
         "event": 0.25,
     },
+    "adaptive": DEFAULT_4D_WEIGHTS,
+}
+
+# 十年 Walk-Forward 滚动前向寻优产出的各状态最优自适应权重矩阵
+REGIME_OPTIMAL_WEIGHTS: Dict[str, Dict[str, float]] = {
+    "BULL": {"technical": 0.20, "news": 0.30, "macro": 0.20, "event": 0.30},
+    "BEAR": {"technical": 0.20, "news": 0.10, "macro": 0.40, "event": 0.30},
+    "SIDEWAYS": {"technical": 0.20, "news": 0.20, "macro": 0.20, "event": 0.40},
+}
+
+REGIME_MODE_DESCRIPTIONS: Dict[str, str] = {
+    "BULL": "牛市动量增强模式",
+    "BEAR": "熊市防御风控模式",
+    "SIDEWAYS": "震荡市平衡模式",
 }
 
 
@@ -186,6 +200,23 @@ class AnalysisService:
     def __init__(self):
         self.stock_service = StockService()
         self.api_keys = _load_api_keys()
+
+    def _resolve_market_regime(self, market: str) -> Tuple[str, str, Dict[str, float]]:
+        """识别大盘基准当前所处的牛熊状态 (BULL/BEAR/SIDEWAYS) 并返回对应的自适应最优权重"""
+        benchmark_code = "000300.SS" if market == "A" else "SPY"
+        try:
+            df_bench = self.stock_service.get_stock_data(benchmark_code, market, period="1y")
+            if df_bench is not None and not df_bench.empty and len(df_bench) >= 50:
+                from .historical_data_service import HistoricalDataService
+                regimes = HistoricalDataService.classify_market_regime_series(df_bench)
+                if not regimes.empty:
+                    regime = str(regimes.iloc[-1]).upper()
+                    if regime in REGIME_OPTIMAL_WEIGHTS:
+                        return regime, REGIME_MODE_DESCRIPTIONS[regime], REGIME_OPTIMAL_WEIGHTS[regime]
+        except Exception as e:
+            logger.info(f"大盘自适应状态推导降级为震荡市: {e}")
+
+        return "SIDEWAYS", REGIME_MODE_DESCRIPTIONS["SIDEWAYS"], REGIME_OPTIMAL_WEIGHTS["SIDEWAYS"]
 
     def analyze_stock(self, stock_code: str, stock_name: str, market: str = "US", mode: str = "simple") -> Dict:
         """
@@ -218,14 +249,47 @@ class AnalysisService:
             macro_score, macro_details = fut_macro.result()
             event_score, event_details = fut_event.result()
 
-        # 计算综合评分（直接读取模块级唯一真源常量 DEFAULT_DIMENSION_WEIGHTS，杜绝硬编码分叉）
-        w = DEFAULT_DIMENSION_WEIGHTS.get(mode, DEFAULT_4D_WEIGHTS)
-        total_score = (
-            tech_score * w["technical"] +
-            news_score * w["news"] +
-            macro_score * w["macro"] +
-            event_score * w["event"]
+        # 解析大盘自适应状态与最优权重
+        curr_regime, mode_desc, adaptive_weights = self._resolve_market_regime(market)
+
+        # 分别计算固定静态分与牛熊自适应分
+        static_w = DEFAULT_DIMENSION_WEIGHTS.get(mode if mode in DEFAULT_DIMENSION_WEIGHTS else "simple", DEFAULT_4D_WEIGHTS)
+        static_total = round(
+            tech_score * static_w["technical"] +
+            news_score * static_w["news"] +
+            macro_score * static_w["macro"] +
+            event_score * static_w["event"],
+            1,
         )
+
+        adaptive_total = round(
+            tech_score * adaptive_weights["technical"] +
+            news_score * adaptive_weights["news"] +
+            macro_score * adaptive_weights["macro"] +
+            event_score * adaptive_weights["event"],
+            1,
+        )
+
+        # 确定生效的总评分与权重
+        if mode == "research":
+            total_score = static_total
+            applied_weights = static_w
+        elif mode == "adaptive":
+            total_score = adaptive_total
+            applied_weights = adaptive_weights
+        else:
+            # simple 默认采用自适应最佳权重
+            total_score = adaptive_total
+            applied_weights = adaptive_weights
+
+        regime_adaptive = {
+            "regime": curr_regime,
+            "mode_desc": mode_desc,
+            "weights": applied_weights,
+            "adaptive_total_score": adaptive_total,
+            "static_total_score": static_total,
+            "score_diff": round(adaptive_total - static_total, 1),
+        }
 
         # 确定推荐等级
         recommendation = self._get_recommendation(total_score)
@@ -265,6 +329,7 @@ class AnalysisService:
             },
             'recommendation': recommendation,
             'earnings_radar': earnings_radar,
+            'regime_adaptive': regime_adaptive,
             'price_levels': price_levels,
             'details': {
                 'technical': tech_details,

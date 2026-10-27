@@ -31,7 +31,7 @@ const Analysis: React.FC = () => {
   const [subChartMode, setSubChartMode] = useState<'volume' | 'macd' | 'rsi'>('volume');
   const [riskCapital, setRiskCapital] = useState<number>(100000);
   const [searchMarket, setSearchMarket] = useState('all');
-  const [analysisMode, setAnalysisMode] = useState<'simple' | 'research'>('simple');
+  const [analysisMode, setAnalysisMode] = useState<'simple' | 'research' | 'adaptive'>('simple');
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [newsExpanded, setNewsExpanded] = useState(false);
@@ -745,11 +745,12 @@ const Analysis: React.FC = () => {
                 <Space wrap>
                   <Select
                     value={analysisMode}
-                    onChange={(v: 'simple' | 'research') => setAnalysisMode(v)}
-                    style={{ width: 185 }}
+                    onChange={(v: 'simple' | 'research' | 'adaptive') => setAnalysisMode(v)}
+                    style={{ width: 195 }}
                     options={[
                       { value: 'simple', label: '标准模式 (40/30/15/15)' },
                       { value: 'research', label: '深度投研 (35/15/25/25)' },
+                      { value: 'adaptive', label: '牛熊自适应 (动态寻优)' },
                     ]}
                   />
                   <Button
@@ -900,6 +901,33 @@ const Analysis: React.FC = () => {
                       </Tag>
                     </div>
                   </div>
+
+                  {analysisResult.regime_adaptive && (
+                    <div style={{
+                      marginBottom: 16,
+                      padding: '10px 12px',
+                      background: colors.bgLight,
+                      borderRadius: 6,
+                      border: `1px solid ${colors.border}`,
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <Tag color={analysisResult.regime_adaptive.regime === 'BULL' ? 'green' : analysisResult.regime_adaptive.regime === 'BEAR' ? 'red' : 'blue'}>
+                          {analysisResult.regime_adaptive.mode_desc}
+                        </Tag>
+                        <span style={{ fontSize: 12, color: colors.textSecondary }}>
+                          自适应分: <b>{analysisResult.regime_adaptive.adaptive_total_score}</b>
+                          {analysisResult.regime_adaptive.score_diff !== 0 && (
+                            <span style={{ color: analysisResult.regime_adaptive.score_diff > 0 ? colors.profit : colors.loss, marginLeft: 4 }}>
+                              ({analysisResult.regime_adaptive.score_diff > 0 ? '+' : ''}{analysisResult.regime_adaptive.score_diff})
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11, color: colors.textSecondary }}>
+                        权重配比：技术 {Math.round(analysisResult.regime_adaptive.weights.technical * 100)}% · 情绪 {Math.round(analysisResult.regime_adaptive.weights.news * 100)}% · 宏观 {Math.round(analysisResult.regime_adaptive.weights.macro * 100)}% · 事件 {Math.round(analysisResult.regime_adaptive.weights.event * 100)}%
+                      </div>
+                    </div>
+                  )}
 
                   <Descriptions column={1} size="small">
                     <Descriptions.Item label="技术面">
