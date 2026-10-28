@@ -101,3 +101,24 @@ class WeeklyTop5Snapshot(Base):
     ai_thesis = Column(Text)                                    # AI 投研逻辑综述
     battle_report_json = Column(Text)                           # JSON 对象: 上期战绩复盘
     created_at = Column(DateTime)
+
+
+class PaperTrade(Base):
+    """一键模拟盘记账与前向胜率跟踪表"""
+    __tablename__ = "paper_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    stock_code = Column(String(20), index=True, nullable=False)
+    stock_name = Column(String(50))
+    market = Column(String(10), default="US")
+    buy_price = Column(Float, nullable=False)
+    buy_date = Column(DateTime, nullable=False)
+    position_pct = Column(String(10), default="20%")
+    take_profit_price = Column(Float, nullable=False)
+    stop_loss_price = Column(Float, nullable=False)
+    status = Column(String(20), index=True, default="OPEN")  # OPEN / PROFIT / LOSS / CLOSED
+    exit_price = Column(Float, nullable=True)
+    exit_date = Column(DateTime, nullable=True)
+    exit_reason = Column(String(50), nullable=True)          # "TARGET_HIT" / "STOP_HIT" / "MANUAL_CLOSE"
+    pnl_pct = Column(Float, nullable=True)                   # 平仓收益率 %
+    created_at = Column(DateTime)

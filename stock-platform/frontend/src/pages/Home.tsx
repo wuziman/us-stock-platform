@@ -15,8 +15,8 @@ import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
-import { portfolioApi, stockApi, reportApi, errDetail } from '../services/api';
-import type { EarningsItem, MarketRegimeResponse, Position, PositionSummary, SearchResult, WatchlistItem } from '../types/api';
+import { portfolioApi, stockApi, reportApi, radarApi, errDetail } from '../services/api';
+import type { EarningsItem, MarketRegimeResponse, Position, PositionSummary, SearchResult, WatchlistItem, RadarItem } from '../types/api';
 import { scheduleApi } from '../services/scheduleApi';
 import { colors } from '../theme/tokens';
 import { currencySymbol } from '../utils/format';
@@ -26,6 +26,8 @@ const Home: React.FC = () => {
   const [summary, setSummary] = useState<PositionSummary | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+  const [radarItems, setRadarItems] = useState<RadarItem[]>([]);
+  const [radarLoading, setRadarLoading] = useState(false);
   const [quickSearchQuery, setQuickSearchQuery] = useState('');
   const [quickSearchResults, setQuickSearchResults] = useState<SearchResult[]>([]);
   const [quickSearching, setQuickSearching] = useState(false);
@@ -92,10 +94,21 @@ const Home: React.FC = () => {
       .catch(() => {}); // 行情失败表格显示'--'，不影响列表
   };
 
+  const fetchRadar = () => {
+    setRadarLoading(true);
+    radarApi.getRadar()
+      .then((res) => {
+        setRadarItems(res.data.items || []);
+      })
+      .catch(() => {})
+      .finally(() => setRadarLoading(false));
+  };
+
   useEffect(() => {
     fetchData();
     fetchSchedule();
     fetchQuotes();
+    fetchRadar();
     // 宏观大盘风控态势与黑天鹅熔断状态
     stockApi.getMarketRegime()
       .then((res) => setMarketRegime(res.data))
@@ -501,6 +514,108 @@ const Home: React.FC = () => {
               ]}
             />
             )}
+          </Card>
+        </Col>
+      </Row>
+
+      {/* 🎯 核心标的与自选买入雷达 */}
+      <Row style={{ marginTop: 16 }}>
+        <Col span={24}>
+          <Card
+            title={
+              <span>
+                🎯 自选股与核心标的买入雷达
+                <Tag color="cyan" style={{ marginLeft: 8, fontWeight: 'normal' }}>
+                  按“距离买点最近”实时排序
+                </Tag>
+              </span>
+            }
+            extra={
+              <Button size="small" icon={<ThunderboltOutlined />} onClick={fetchRadar} loading={radarLoading}>
+                刷新雷达
+              </Button>
+            }
+          >
+            <Table
+              dataSource={radarItems}
+              rowKey="stock_code"
+              size="small"
+              loading={radarLoading}
+              pagination={false}
+              onRow={(record: RadarItem) => ({
+                style: { cursor: 'pointer' },
+                onClick: () => navigate(`/analysis?code=${record.stock_code}&name=${encodeURIComponent(record.stock_name)}&market=${record.market}`),
+              })}
+              columns={[
+                {
+                  title: '标的',
+                  key: 'code',
+                  render: (_: unknown, r: RadarItem) => (
+                    <Space>
+                      <b>{r.stock_code}</b>
+                      <span style={{ fontSize: 12, color: colors.textSecondary }}>{r.stock_name}</span>
+                      <Tag color={r.market === 'A' ? 'red' : 'blue'}>{r.market === 'A' ? 'A股' : '美股'}</Tag>
+                    </Space>
+                  ),
+                },
+                {
+                  title: '当前现价',
+                  dataIndex: 'current_price',
+                  key: 'current_price',
+                  render: (v: number, r: RadarItem) => `${currencySymbol(r.market)}${v}`,
+                },
+                {
+                  title: '今日涨跌',
+                  dataIndex: 'change_percent',
+                  key: 'change_percent',
+                  render: (v: number) => (
+                    <span style={{ color: v > 0 ? colors.profit : v < 0 ? colors.loss : colors.textSecondary }}>
+                      {v > 0 ? `+${v}%` : `${v}%`}
+                    </span>
+                  ),
+                },
+                {
+                  title: '建议买点',
+                  dataIndex: 'buy_price',
+                  key: 'buy_price',
+                  render: (v: number, r: RadarItem) => <b>{currencySymbol(r.market)}{v}</b>,
+                },
+                {
+                  title: '距离买点偏差',
+                  dataIndex: 'distance_pct',
+                  key: 'distance_pct',
+                  render: (v: number) => (
+                    <Tag color={v <= 0.5 ? 'green' : v <= 2.0 ? 'gold' : 'default'}>
+                      {v <= 0 ? `已跌破买点 (${v}%)` : `距买点 +${v}%`}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: '推荐仓位',
+                  dataIndex: 'position_pct',
+                  key: 'position_pct',
+                  render: (v: string) => <Tag color="blue">{v}</Tag>,
+                },
+                {
+                  title: '雷达状态',
+                  key: 'status',
+                  render: (_: unknown, r: RadarItem) => (
+                    <Tag color={r.status_color}>
+                      {r.status_label}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: '操作',
+                  key: 'action',
+                  render: () => (
+                    <Button size="small" type="primary" ghost>
+                      查看5数操盘卡
+                    </Button>
+                  ),
+                },
+              ]}
+            />
           </Card>
         </Col>
       </Row>

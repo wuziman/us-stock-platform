@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type { AnalysisResult, HistoryItem, KlineBar, SearchResult } from '../types/api';
+import type { AnalysisResult, HistoryItem, KlineBar, SearchResult, PaperTradeItem, PaperTradeSummary } from '../types/api';
 import { calcPositionSize, currencySymbol, fmtDist, fmtPx } from '../utils/format';
-import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber, Empty, Collapse } from 'antd';
-import { SearchOutlined, StarOutlined, StarFilled, LineChartOutlined } from '@ant-design/icons';
+import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber, Empty, Collapse, Drawer, Popconfirm } from 'antd';
+import { SearchOutlined, StarOutlined, StarFilled, LineChartOutlined, ThunderboltOutlined, TrophyOutlined, DeleteOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
-import { stockApi, analysisApi, portfolioApi } from '../services/api';
+import { stockApi, analysisApi, portfolioApi, paperTradingApi } from '../services/api';
 import { patternApi, SignalsResult } from '../services/patternApi';
 import { trackingApi, TrackingResult, WeightHealthReport } from '../services/trackingApi';
 import { colors } from '../theme/tokens';
@@ -38,9 +38,75 @@ const Analysis: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [recentAnalyses, setRecentAnalyses] = useState<HistoryItem[]>([]);
 
+  // 模拟实战盘记账与前向跟踪
+  const [paperTrades, setPaperTrades] = useState<PaperTradeItem[]>([]);
+  const [paperSummary, setPaperSummary] = useState<PaperTradeSummary | null>(null);
+  const [paperLoading, setPaperLoading] = useState(false);
+  const [paperDrawerVisible, setPaperDrawerVisible] = useState(false);
+  const [paperOpening, setPaperOpening] = useState(false);
+
   // 切股请求序号：只有最新一次选择的结果允许写入state，防止慢的旧响应覆盖新股票数据
   const selectSeqRef = useRef(0);
   const selectedStockRef = useRef<SearchResult | null>(null); // 在途响应返回时比对当前选中股票用
+
+  const fetchPaperTradingData = async () => {
+    setPaperLoading(true);
+    try {
+      const [posRes, sumRes] = await Promise.all([
+        paperTradingApi.getPositions(),
+        paperTradingApi.getSummary(),
+      ]);
+      setPaperTrades(posRes.data.items || []);
+      setPaperSummary(sumRes.data);
+    } catch {
+      // quiet
+    } finally {
+      setPaperLoading(false);
+    }
+  };
+
+  const handleOpenPaperTrade = async () => {
+    if (!analysisResult?.action_card || !selectedStock) return;
+    setPaperOpening(true);
+    try {
+      const card = analysisResult.action_card;
+      await paperTradingApi.open({
+        stock_code: selectedStock.code,
+        stock_name: selectedStock.name,
+        market: selectedStock.market,
+        buy_price: card.buy_price,
+        position_pct: card.position_pct,
+        take_profit_price: card.take_profit_price,
+        stop_loss_price: card.stop_loss_price,
+      });
+      message.success(`📥 已将 ${selectedStock.code} 录入模拟实战盘 (买点: ${card.buy_price}, 止盈: ${card.take_profit_price}, 止损: ${card.stop_loss_price})`);
+      fetchPaperTradingData();
+    } catch {
+      message.error('模拟开仓失败');
+    } finally {
+      setPaperOpening(false);
+    }
+  };
+
+  const handleClosePaperTrade = async (id: number) => {
+    try {
+      await paperTradingApi.close(id);
+      message.success('已手动平仓');
+      fetchPaperTradingData();
+    } catch {
+      message.error('平仓失败');
+    }
+  };
+
+  const handleDeletePaperTrade = async (id: number) => {
+    try {
+      await paperTradingApi.delete(id);
+      message.success('已删除模拟记录');
+      fetchPaperTradingData();
+    } catch {
+      message.error('删除失败');
+    }
+  };
 
   const handleSearch = async (value: string) => {
     if (!value.trim()) return;
@@ -134,6 +200,7 @@ const Analysis: React.FC = () => {
         }
       })
       .catch(() => {});
+    fetchPaperTradingData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -760,9 +827,29 @@ const Analysis: React.FC = () => {
                     {analysisResult.action_card.one_sentence_reason}
                   </span>
                 </div>
-                <Tag color="cyan" style={{ fontSize: 12, padding: '2px 8px' }}>
-                  盈亏比 {analysisResult.action_card.risk_reward_ratio}
-                </Tag>
+                <Space size="small" wrap>
+                  <Tag color="cyan" style={{ fontSize: 13, padding: '2px 8px' }}>
+                    盈亏比 {analysisResult.action_card.risk_reward_ratio}
+                  </Tag>
+                  <Button
+                    type="primary"
+                    icon={<ThunderboltOutlined />}
+                    style={{ background: colors.success, borderColor: colors.success }}
+                    loading={paperOpening}
+                    onClick={handleOpenPaperTrade}
+                  >
+                    📥 一键模拟买入 (Paper Trade)
+                  </Button>
+                  <Button
+                    icon={<TrophyOutlined />}
+                    onClick={() => {
+                      fetchPaperTradingData();
+                      setPaperDrawerVisible(true);
+                    }}
+                  >
+                    战绩看板 ({paperSummary?.win_rate_pct ?? 0}%胜率)
+                  </Button>
+                </Space>
               </div>
 
               <Row gutter={[12, 12]}>
@@ -1345,6 +1432,132 @@ const Analysis: React.FC = () => {
         </Row>
       </>
     )}
+
+      {/* 📊 模拟实战盘前向跟踪与战绩看板 Drawer */}
+      <Drawer
+        title="📊 模拟实战盘前向跟踪与战绩看板"
+        width={760}
+        open={paperDrawerVisible}
+        onClose={() => setPaperDrawerVisible(false)}
+        extra={
+          <Button size="small" onClick={fetchPaperTradingData} loading={paperLoading}>
+            刷新盯盘
+          </Button>
+        }
+      >
+        <Row gutter={16} style={{ marginBottom: 16 }}>
+          <Col span={8}>
+            <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+              <div style={{ fontSize: 12, color: colors.textSecondary }}>实战累计胜率</div>
+              <div style={{ fontSize: 24, fontWeight: 'bold', color: (paperSummary?.win_rate_pct ?? 0) >= 50 ? colors.profit : colors.loss }}>
+                {paperSummary?.win_rate_pct ?? 0}%
+              </div>
+              <div style={{ fontSize: 11, color: colors.textSecondary }}>
+                胜 {paperSummary?.win_trades ?? 0} / 负 {paperSummary?.loss_trades ?? 0}
+              </div>
+            </Card>
+          </Col>
+          <Col span={8}>
+            <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+              <div style={{ fontSize: 12, color: colors.textSecondary }}>累计已平仓盈亏</div>
+              <div style={{ fontSize: 24, fontWeight: 'bold', color: (paperSummary?.total_realized_pnl_pct ?? 0) >= 0 ? colors.profit : colors.loss }}>
+                {(paperSummary?.total_realized_pnl_pct ?? 0) > 0 ? '+' : ''}{paperSummary?.total_realized_pnl_pct ?? 0}%
+              </div>
+              <div style={{ fontSize: 11, color: colors.textSecondary }}>已结算 {paperSummary?.total_settled_trades ?? 0} 笔</div>
+            </Card>
+          </Col>
+          <Col span={8}>
+            <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+              <div style={{ fontSize: 12, color: colors.textSecondary }}>当前持仓监控中</div>
+              <div style={{ fontSize: 24, fontWeight: 'bold', color: colors.primary }}>
+                {paperSummary?.open_trades_count ?? 0} 笔
+              </div>
+              <div style={{ fontSize: 11, color: colors.textSecondary }}>实时自动按现价对碰</div>
+            </Card>
+          </Col>
+        </Row>
+
+        <Table
+          dataSource={paperTrades}
+          rowKey="id"
+          size="small"
+          loading={paperLoading}
+          pagination={{ pageSize: 8 }}
+          columns={[
+            {
+              title: '标的',
+              key: 'ticker',
+              render: (_: unknown, r: PaperTradeItem) => (
+                <Space direction="vertical" size={0}>
+                  <b>{r.stock_code}</b>
+                  <span style={{ fontSize: 11, color: colors.textSecondary }}>{r.stock_name}</span>
+                </Space>
+              ),
+            },
+            {
+              title: '买入点/现价',
+              key: 'prices',
+              render: (_: unknown, r: PaperTradeItem) => (
+                <div>
+                  <div>买: {currencySymbol(r.market)}{r.buy_price}</div>
+                  <div style={{ fontSize: 11, color: colors.textSecondary }}>
+                    现: {r.current_price != null ? `${currencySymbol(r.market)}${r.current_price}` : (r.exit_price != null ? `${currencySymbol(r.market)}${r.exit_price}` : '--')}
+                  </div>
+                </div>
+              ),
+            },
+            {
+              title: '止盈/止损线',
+              key: 'targets',
+              render: (_: unknown, r: PaperTradeItem) => (
+                <div style={{ fontSize: 11 }}>
+                  <div style={{ color: colors.profit }}>盈: {currencySymbol(r.market)}{r.take_profit_price}</div>
+                  <div style={{ color: colors.loss }}>损: {currencySymbol(r.market)}{r.stop_loss_price}</div>
+                </div>
+              ),
+            },
+            {
+              title: '盈亏表现',
+              key: 'pnl',
+              render: (_: unknown, r: PaperTradeItem) => {
+                const val = r.pnl_pct != null ? r.pnl_pct : r.unrealized_pnl_pct;
+                if (val == null) return '--';
+                return (
+                  <span style={{ fontWeight: 'bold', color: val > 0 ? colors.profit : val < 0 ? colors.loss : colors.textSecondary }}>
+                    {val > 0 ? `+${val}%` : `${val}%`}
+                    {r.status === 'OPEN' && <span style={{ fontSize: 10, fontWeight: 'normal' }}> (浮动)</span>}
+                  </span>
+                );
+              },
+            },
+            {
+              title: '状态',
+              key: 'status',
+              render: (_: unknown, r: PaperTradeItem) => {
+                if (r.status === 'PROFIT') return <Tag color="green" icon={<CheckCircleOutlined />}>🎯 止盈达成</Tag>;
+                if (r.status === 'LOSS') return <Tag color="red" icon={<CloseCircleOutlined />}>⛔ 止损离场</Tag>;
+                return <Tag color="blue">持仓盯盘中</Tag>;
+              },
+            },
+            {
+              title: '操作',
+              key: 'action',
+              render: (_: unknown, r: PaperTradeItem) => (
+                <Space size={4}>
+                  {r.status === 'OPEN' && (
+                    <Button size="small" type="link" onClick={() => handleClosePaperTrade(r.id)}>
+                      手动平仓
+                    </Button>
+                  )}
+                  <Popconfirm title="确定删除该记录？" onConfirm={() => handleDeletePaperTrade(r.id)}>
+                    <Button size="small" type="text" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </Drawer>
     </div>
   );
 };

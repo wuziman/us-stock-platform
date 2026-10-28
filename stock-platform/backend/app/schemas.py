@@ -71,6 +71,37 @@ class AnalysisResponse(BaseModel):
     action_card: Optional[TradeActionCard] = None
 
 
+# 模拟实战记账
+class PaperTradeOpenRequest(BaseModel):
+    stock_code: str
+    stock_name: str
+    market: str = "US"
+    buy_price: float = Field(..., gt=0)
+    position_pct: str = "20%"
+    take_profit_price: float = Field(..., gt=0)
+    stop_loss_price: float = Field(..., gt=0)
+
+
+class PaperTradeResponse(BaseModel):
+    id: int
+    stock_code: str
+    stock_name: Optional[str] = None
+    market: str = "US"
+    buy_price: float
+    buy_date: datetime
+    position_pct: str
+    take_profit_price: float
+    stop_loss_price: float
+    status: str
+    current_price: Optional[float] = None
+    unrealized_pnl_pct: Optional[float] = None
+    exit_price: Optional[float] = None
+    exit_date: Optional[datetime] = None
+    exit_reason: Optional[str] = None
+    pnl_pct: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+
 # 持仓
 class PositionCreate(BaseModel):
     stock_code: str

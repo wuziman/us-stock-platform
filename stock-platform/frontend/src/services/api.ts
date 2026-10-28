@@ -28,6 +28,10 @@ import type {
   WeeklyAlphaResponse,
   WeeklyHistoryResponse,
   AIPickPerformanceResponse,
+  RadarItem,
+  PaperTradeOpenPayload,
+  PaperTradeItem,
+  PaperTradeSummary,
 } from '../types/api';
 
 const api = axios.create({
@@ -249,6 +253,20 @@ export const aiPickApi = {
 
   getWeeklyAlphaHistory: () =>
     api.get<WeeklyHistoryResponse>('/ai-pick/top5/history'),
+};
+
+// 买入雷达API
+export const radarApi = {
+  getRadar: () => api.get<{ items: RadarItem[] }>('/stocks/radar'),
+};
+
+// 模拟实战记账API
+export const paperTradingApi = {
+  open: (data: PaperTradeOpenPayload) => api.post<{ success: boolean; trade_id: number; message: string }>('/paper-trading/open', data),
+  getPositions: () => api.get<{ items: PaperTradeItem[] }>('/paper-trading/positions'),
+  getSummary: () => api.get<PaperTradeSummary>('/paper-trading/summary'),
+  close: (id: number) => api.post<{ success: boolean; data: unknown }>(`/paper-trading/${id}/close`),
+  delete: (id: number) => api.delete<{ success: boolean }>(`/paper-trading/${id}`),
 };
 
 export default api;

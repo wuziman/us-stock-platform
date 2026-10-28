@@ -8,6 +8,7 @@ from sqlalchemy import text
 from .database import engine, Base
 from .routers import stocks_router, analysis_router, backtest_router, portfolio_router, report_router
 from .routers.ai_pick import router as ai_pick_router
+from .routers.paper_trading import router as paper_trading_router
 from .services.scheduler_service import start_scheduler
 from . import models_platform  # noqa: F401  注册平台扩展表模型（须在create_all之前导入）
 
@@ -70,6 +71,7 @@ app.include_router(backtest_router)
 app.include_router(portfolio_router)
 app.include_router(report_router)
 app.include_router(ai_pick_router)
+app.include_router(paper_trading_router)
 
 
 @app.get("/")

@@ -38,6 +38,14 @@ def search_stocks(q: str = Query(..., min_length=1), market: str = "all"):
     return {"results": results}
 
 
+@router.get("/radar")
+def get_buy_radar(db: Session = Depends(get_db)):
+    """自选股与核心标的批量买入雷达"""
+    from ..services.radar_service import RadarService
+    service = RadarService()
+    return {"items": service.scan_radar_universe(db=db)}
+
+
 @router.get("/{code}/quote")
 def get_quote(code: str, market: str = "US"):
     """获取实时行情"""

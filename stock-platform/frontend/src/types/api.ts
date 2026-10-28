@@ -635,3 +635,58 @@ export interface AIPickPerformanceResponse {
   picks: AIPickPerformanceItem[];
   note?: string;
 }
+
+// ===== 买入雷达 =====
+export interface RadarItem {
+  stock_code: string;
+  stock_name: string;
+  market: string;
+  current_price: number;
+  change_percent: number;
+  buy_price: number;
+  distance_pct: number;
+  position_pct: string;
+  status: 'TRIGGERED' | 'APPROACHING' | 'WAITING';
+  status_label: string;
+  status_color: string;
+}
+
+// ===== 模拟实战记账 =====
+export interface PaperTradeOpenPayload {
+  stock_code: string;
+  stock_name: string;
+  market?: string;
+  buy_price: number;
+  position_pct?: string;
+  take_profit_price: number;
+  stop_loss_price: number;
+}
+
+export interface PaperTradeItem {
+  id: number;
+  stock_code: string;
+  stock_name?: string;
+  market: string;
+  buy_price: number;
+  buy_date: string;
+  position_pct: string;
+  take_profit_price: number;
+  stop_loss_price: number;
+  status: 'OPEN' | 'PROFIT' | 'LOSS' | 'CLOSED';
+  current_price?: number | null;
+  unrealized_pnl_pct?: number | null;
+  exit_price?: number | null;
+  exit_date?: string | null;
+  exit_reason?: string | null;
+  pnl_pct?: number | null;
+  created_at?: string | null;
+}
+
+export interface PaperTradeSummary {
+  total_settled_trades: number;
+  win_trades: number;
+  loss_trades: number;
+  win_rate_pct: number;
+  total_realized_pnl_pct: number;
+  open_trades_count: number;
+}
