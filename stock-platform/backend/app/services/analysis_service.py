@@ -316,6 +316,16 @@ class AnalysisService:
         # 计算三策略点位（线性/非线性/MACD + ATR动态点位 + 保本触发位）
         price_levels = self._calculate_both_strategies(df_with_indicators, latest, market)
 
+        # 构建极简行动决策卡（傻瓜式5数交易卡）
+        action_card = self._build_action_card(
+            current_price=float(latest['Close']),
+            total_score=total_score,
+            price_levels=price_levels,
+            recommendation=recommendation,
+            earnings_radar=earnings_radar,
+            stock_code=stock_code,
+        )
+
         return {
             'stock_code': stock_code,
             'stock_name': stock_name,
@@ -330,6 +340,7 @@ class AnalysisService:
             'recommendation': recommendation,
             'earnings_radar': earnings_radar,
             'regime_adaptive': regime_adaptive,
+            'action_card': action_card,
             'price_levels': price_levels,
             'details': {
                 'technical': tech_details,
@@ -337,6 +348,65 @@ class AnalysisService:
                 'macro': macro_details,
                 'event': event_details
             }
+        }
+
+    @staticmethod
+    def _build_action_card(
+        current_price: float,
+        total_score: float,
+        price_levels: Dict,
+        recommendation: Dict,
+        earnings_radar: Dict,
+        stock_code: str,
+    ) -> Dict[str, Any]:
+        """构建极简行动决策卡（纯净5大核心数字+大白话行动指南）"""
+        is_leveraged = stock_code.upper() in ("SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU")
+        linear_levels = price_levels.get("linear", {})
+        raw_buy = linear_levels.get("buy") or (current_price * 0.95)
+        buy_px = round(float(raw_buy), 2)
+        profit_px = round(float(linear_levels.get("atr_profit") or linear_levels.get("profit") or (buy_px * 1.15)), 2)
+        stop_px = round(float(linear_levels.get("atr_stop") or linear_levels.get("stop") or (buy_px * 0.92)), 2)
+
+        risk = max(0.01, buy_px - stop_px)
+        reward = max(0.01, profit_px - buy_px)
+        rr_str = f"{round(reward / risk, 2)}:1"
+
+        if earnings_radar.get("is_imminent"):
+            action_type = "WAIT_AND_SEE"
+            action_label = "财报避险·观望"
+            one_sentence_reason = "3天内面临重磅财报公布，波动率极高，严禁左侧博弈，待业绩落地后再择机入场"
+            position_pct = "0%"
+        elif total_score < 3.5 or recommendation.get("action") == "卖出":
+            action_type = "SELL"
+            action_label = "坚决离场"
+            one_sentence_reason = f"多头指标破位且综合评分仅{total_score}分，趋势向下，严禁逆势抄底"
+            position_pct = "0%"
+        elif total_score >= 6.5:
+            if abs(current_price - buy_px) / current_price < 0.015:
+                action_type = "BUY_NOW"
+                action_label = "现价分批进"
+                one_sentence_reason = f"综合评分{total_score}分处于强势主升区，现价已达支撑位，可立即建立首仓"
+            else:
+                action_type = "BUY_ON_PULLBACK"
+                action_label = "挂单等回踩"
+                one_sentence_reason = f"动量良好(评分{total_score}分)，但现价偏离支撑，建议挂单${buy_px}等回踩分批建仓"
+            position_pct = "15%" if is_leveraged else ("30%" if total_score >= 8.0 else "20%")
+        else:
+            action_type = "WAIT_AND_SEE"
+            action_label = "挂单等深度回踩"
+            one_sentence_reason = f"处于整理蓄势期(评分{total_score}分)，严禁追高，仅建议在强支撑${buy_px}轻仓埋伏"
+            position_pct = "10%" if is_leveraged else "15%"
+
+        return {
+            "action_type": action_type,
+            "action_label": action_label,
+            "current_price": round(current_price, 2),
+            "buy_price": buy_px,
+            "position_pct": position_pct,
+            "take_profit_price": profit_px,
+            "stop_loss_price": stop_px,
+            "one_sentence_reason": one_sentence_reason,
+            "risk_reward_ratio": rr_str,
         }
 
     # ============================================

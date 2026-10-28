@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { AnalysisResult, HistoryItem, KlineBar, SearchResult } from '../types/api';
 import { calcPositionSize, currencySymbol, fmtDist, fmtPx } from '../utils/format';
-import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber, Empty } from 'antd';
+import { Card, Input, Select, Button, Row, Col, Tag, message, Descriptions, Progress, Space, Divider, Tabs, Checkbox, Alert, Table, InputNumber, Empty, Collapse } from 'antd';
 import { SearchOutlined, StarOutlined, StarFilled, LineChartOutlined } from '@ant-design/icons';
 import ReactEChartsCore from 'echarts-for-react/lib/core';
 import echarts from '../services/echarts';
@@ -730,7 +730,87 @@ const Analysis: React.FC = () => {
       )}
 
       {selectedStock && (
-        <Row gutter={16}>
+        <>
+          {analysisResult?.action_card && (
+            <Card
+              style={{
+                marginBottom: 16,
+                border: `2px solid ${
+                  analysisResult.action_card.action_type === 'BUY_NOW' ? colors.success :
+                  analysisResult.action_card.action_type === 'BUY_ON_PULLBACK' ? colors.primary :
+                  analysisResult.action_card.action_type === 'SELL' ? colors.loss : colors.warning
+                }`,
+                borderRadius: 8,
+                boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <Tag
+                    color={
+                      analysisResult.action_card.action_type === 'BUY_NOW' ? 'green' :
+                      analysisResult.action_card.action_type === 'BUY_ON_PULLBACK' ? 'blue' :
+                      analysisResult.action_card.action_type === 'SELL' ? 'red' : 'orange'
+                    }
+                    style={{ fontSize: 16, padding: '4px 14px', fontWeight: 'bold' }}
+                  >
+                    {analysisResult.action_card.action_label}
+                  </Tag>
+                  <span style={{ fontSize: 15, fontWeight: 600 }}>
+                    {analysisResult.action_card.one_sentence_reason}
+                  </span>
+                </div>
+                <Tag color="cyan" style={{ fontSize: 12, padding: '2px 8px' }}>
+                  盈亏比 {analysisResult.action_card.risk_reward_ratio}
+                </Tag>
+              </div>
+
+              <Row gutter={[12, 12]}>
+                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>1. 当前现价</div>
+                    <div style={{ fontSize: 22, fontWeight: 'bold' }}>
+                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.current_price}
+                    </div>
+                  </Card>
+                </Col>
+                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>2. 建议买入价</div>
+                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.primary }}>
+                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.buy_price}
+                    </div>
+                  </Card>
+                </Col>
+                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>3. 推荐仓位</div>
+                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.warning }}>
+                      {analysisResult.action_card.position_pct}
+                    </div>
+                  </Card>
+                </Col>
+                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>4. 止盈获利点</div>
+                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.profit }}>
+                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.take_profit_price}
+                    </div>
+                  </Card>
+                </Col>
+                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>5. 铁血止损点</div>
+                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.loss }}>
+                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.stop_loss_price}
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+            </Card>
+          )}
+
+          <Row gutter={16}>
           <Col xs={24} lg={16}>
             <Card
               title={
@@ -1155,87 +1235,103 @@ const Analysis: React.FC = () => {
                   </div>
                 </Card>
 
-                {renderSignalsCard()}
+                <Collapse
+                  style={{ marginBottom: 16 }}
+                  defaultActiveKey={[]}
+                  items={[
+                    {
+                      key: 'adv',
+                      label: (
+                        <span style={{ fontWeight: 600, color: colors.textSecondary }}>
+                          🔬 高级量化分析细节与四维底层参数 (选读 · 点击展开)
+                        </span>
+                      ),
+                      children: (
+                        <div>
+                          {renderSignalsCard()}
+                          {renderTrackingCard()}
+                          {analysisResult.details?.news?.news && analysisResult.details.news.news.length > 0 && (
+                            <Card title={`📰 消息面 · ${analysisResult.details.news.sentiment}`} style={{ marginBottom: 16 }}>
+                              <div style={{ marginBottom: 8, fontSize: 12, color: colors.textSecondary }}>
+                                共{analysisResult.details.news.news_count}条新闻 | 利好{analysisResult.details.news.positive_count}条 / 利空{analysisResult.details.news.negative_count}条
+                              </div>
+                              {(newsExpanded
+                                ? analysisResult.details.news.news
+                                : analysisResult.details.news.news.slice(0, 8)
+                              ).map((n: any, i: number) => (
+                                <div key={i} style={{ marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
+                                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                                    <Tag color={n.sentiment > 0 ? 'green' : n.sentiment < 0 ? 'red' : 'default'} style={{ flexShrink: 0 }}>
+                                      {n.sentiment > 0 ? '利好' : n.sentiment < 0 ? '利空' : '中性'}
+                                    </Tag>
+                                    {n.url ? (
+                                      <a
+                                        href={n.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        style={{ fontSize: 13, lineHeight: 1.5, color: 'inherit' }}
+                                        title="点击查看原文"
+                                      >
+                                        {n.title}
+                                      </a>
+                                    ) : (
+                                      <span style={{ fontSize: 13, lineHeight: 1.5 }}>{n.title}</span>
+                                    )}
+                                  </div>
+                                  <div style={{ fontSize: 11, color: colors.textSecondary, marginTop: 4, marginLeft: 44 }}>
+                                    {n.source} · {n.date}
+                                    {n.url && (
+                                      <a href={n.url} target="_blank" rel="noopener noreferrer" style={{ marginLeft: 6 }}>↗</a>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                              {analysisResult.details.news.news.length > 8 && (
+                                <div style={{ textAlign: 'center', marginTop: 4 }}>
+                                  <Button type="link" size="small" onClick={() => setNewsExpanded(!newsExpanded)}>
+                                    {newsExpanded
+                                      ? '收起'
+                                      : `▼ 显示更多 (还有${analysisResult.details.news.news.length - 8}条)`}
+                                  </Button>
+                                </div>
+                              )}
+                            </Card>
+                          )}
 
-                {renderTrackingCard()}
-
-                {analysisResult.details?.news?.news && analysisResult.details.news.news.length > 0 && (
-                  <Card title={`📰 消息面 · ${analysisResult.details.news.sentiment}`} style={{ marginBottom: 16 }}>
-                    <div style={{ marginBottom: 8, fontSize: 12, color: colors.textSecondary }}>
-                      共{analysisResult.details.news.news_count}条新闻 | 利好{analysisResult.details.news.positive_count}条 / 利空{analysisResult.details.news.negative_count}条
-                    </div>
-                    {(newsExpanded
-                      ? analysisResult.details.news.news
-                      : analysisResult.details.news.news.slice(0, 8)
-                    ).map((n: any, i: number) => (
-                      <div key={i} style={{ marginBottom: 10, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
-                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-                          <Tag color={n.sentiment > 0 ? 'green' : n.sentiment < 0 ? 'red' : 'default'} style={{ flexShrink: 0 }}>
-                            {n.sentiment > 0 ? '利好' : n.sentiment < 0 ? '利空' : '中性'}
-                          </Tag>
-                          {n.url ? (
-                            <a
-                              href={n.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ fontSize: 13, lineHeight: 1.5, color: 'inherit' }}
-                              title="点击查看原文"
-                            >
-                              {n.title}
-                            </a>
-                          ) : (
-                            <span style={{ fontSize: 13, lineHeight: 1.5 }}>{n.title}</span>
+                          {((analysisResult.details?.macro?.interpretations?.length ?? 0) > 0 || (analysisResult.details?.event?.events?.length ?? 0) > 0) && (
+                            <Card title="🌍 宏观 & 事件">
+                              {analysisResult.details.macro?.indicators && Object.keys(analysisResult.details.macro.indicators).length > 0 && (
+                                <div style={{ marginBottom: 8 }}>
+                                  {Object.entries({
+                                    fed_rate: '联邦利率',
+                                    cpi_yoy: 'CPI同比',
+                                    unemployment: '失业率'
+                                  }).map(([key, label]) => {
+                                    const val = analysisResult.details.macro.indicators?.[key];
+                                    return val != null ? (
+                                      <Tag key={key} style={{ marginBottom: 4 }}>{label}: {val}%</Tag>
+                                    ) : null;
+                                  })}
+                                </div>
+                              )}
+                              {(analysisResult.details.macro?.interpretations || []).map((s: string, i: number) => (
+                                <div key={i} style={{ fontSize: 13, color: '#555', marginBottom: 4 }}>• {s}</div>
+                              ))}
+                              <Divider style={{ margin: '8px 0' }} />
+                              {(analysisResult.details.event?.events || []).map((e: any, i: number) => (
+                                <div key={i} style={{ fontSize: 13, marginBottom: 6 }}>
+                                  <b>{e.name}</b>
+                                  {e.date ? ` (${e.date}${e.days_away !== null ? `, ${e.days_away > 0 ? `${e.days_away}天后` : '已发布'}` : ''})` : ''}
+                                  ：{e.impact}
+                                </div>
+                              ))}
+                            </Card>
                           )}
                         </div>
-                        <div style={{ fontSize: 11, color: colors.textSecondary, marginTop: 4, marginLeft: 44 }}>
-                          {n.source} · {n.date}
-                          {n.url && (
-                            <a href={n.url} target="_blank" rel="noopener noreferrer" style={{ marginLeft: 6 }}>↗</a>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                    {analysisResult.details.news.news.length > 8 && (
-                      <div style={{ textAlign: 'center', marginTop: 4 }}>
-                        <Button type="link" size="small" onClick={() => setNewsExpanded(!newsExpanded)}>
-                          {newsExpanded
-                            ? '收起'
-                            : `▼ 显示更多 (还有${analysisResult.details.news.news.length - 8}条)`}
-                        </Button>
-                      </div>
-                    )}
-                  </Card>
-                )}
-
-                {((analysisResult.details?.macro?.interpretations?.length ?? 0) > 0 || (analysisResult.details?.event?.events?.length ?? 0) > 0) && (
-                  <Card title="🌍 宏观 & 事件">
-                    {analysisResult.details.macro?.indicators && Object.keys(analysisResult.details.macro.indicators).length > 0 && (
-                      <div style={{ marginBottom: 8 }}>
-                        {Object.entries({
-                          fed_rate: '联邦利率',
-                          cpi_yoy: 'CPI同比',
-                          unemployment: '失业率'
-                        }).map(([key, label]) => {
-                          const val = analysisResult.details.macro.indicators?.[key];
-                          return val != null ? (
-                            <Tag key={key} style={{ marginBottom: 4 }}>{label}: {val}%</Tag>
-                          ) : null;
-                        })}
-                      </div>
-                    )}
-                    {(analysisResult.details.macro?.interpretations || []).map((s: string, i: number) => (
-                      <div key={i} style={{ fontSize: 13, color: '#555', marginBottom: 4 }}>• {s}</div>
-                    ))}
-                    <Divider style={{ margin: '8px 0' }} />
-                    {(analysisResult.details.event?.events || []).map((e: any, i: number) => (
-                      <div key={i} style={{ fontSize: 13, marginBottom: 6 }}>
-                        <b>{e.name}</b>
-                        {e.date ? ` (${e.date}${e.days_away !== null ? `, ${e.days_away > 0 ? `${e.days_away}天后` : '已发布'}` : ''})` : ''}
-                        ：{e.impact}
-                      </div>
-                    ))}
-                  </Card>
-                )}
+                      )
+                    }
+                  ]}
+                />
               </>
             ) : (
               <Card title="最近分析">
@@ -1247,7 +1343,8 @@ const Analysis: React.FC = () => {
             {!analysisResult && renderTrackingCard()}
           </Col>
         </Row>
-      )}
+      </>
+    )}
     </div>
   );
 };

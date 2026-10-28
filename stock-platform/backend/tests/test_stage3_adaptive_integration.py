@@ -50,6 +50,17 @@ def test_analyze_stock_regime_adaptive_structure(monkeypatch):
     assert "score_diff" in ra
     assert round(ra["adaptive_total_score"] - ra["static_total_score"], 1) == ra["score_diff"]
 
+    assert "action_card" in res
+    ac = res["action_card"]
+    assert ac is not None
+    assert ac["current_price"] > 0
+    assert ac["buy_price"] > 0
+    assert ac["take_profit_price"] > 0
+    assert ac["stop_loss_price"] > 0
+    assert ac["position_pct"] != ""
+    assert ac["action_label"] != ""
+    assert ac["one_sentence_reason"] != ""
+
 
 def test_analyze_stock_mode_switching(monkeypatch):
     """验证 adaptive 模式与 research 模式正确切换生效权重"""

@@ -46,6 +46,18 @@ class MarketRegimeResponse(BaseModel):
     advice: str
 
 
+class TradeActionCard(BaseModel):
+    action_type: str = "WAIT_AND_SEE"
+    action_label: str = "观望不买"
+    current_price: float = 0.0
+    buy_price: float = 0.0
+    position_pct: str = "0%"
+    take_profit_price: float = 0.0
+    stop_loss_price: float = 0.0
+    one_sentence_reason: str = ""
+    risk_reward_ratio: str = "1.88:1"
+
+
 class AnalysisResponse(BaseModel):
     stock_code: str
     stock_name: str
@@ -56,6 +68,7 @@ class AnalysisResponse(BaseModel):
     details: Dict[str, Any]
     earnings_radar: Optional[EarningsRadar] = None
     regime_adaptive: Optional[Dict[str, Any]] = None
+    action_card: Optional[TradeActionCard] = None
 
 
 # 持仓

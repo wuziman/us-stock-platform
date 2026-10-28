@@ -265,6 +265,17 @@ export interface AnalysisResult {
     static_total_score: number;
     score_diff: number;
   };
+  action_card?: {
+    action_type: string;
+    action_label: string;
+    current_price: number;
+    buy_price: number;
+    position_pct: string;
+    take_profit_price: number;
+    stop_loss_price: number;
+    one_sentence_reason: string;
+    risk_reward_ratio: string;
+  };
   price_levels: {
     current_price: number | null;
     atr?: number | null;
