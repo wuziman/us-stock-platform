@@ -1,23 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Card, Button, Tag, Space, Alert, Modal, Input, message,
-  Descriptions, Spin, Typography, Tooltip, Row, Col
+  Card, Button, Tag, Space, Alert, Modal, message,
+  Descriptions, Spin, Tooltip, Row, Col
 } from 'antd';
 import {
-  FileTextOutlined, ReloadOutlined, SettingOutlined, ThunderboltOutlined,
+  ReloadOutlined, ThunderboltOutlined,
   RocketOutlined, StarOutlined, LineChartOutlined, TrophyOutlined
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { aiPickApi, stockApi, errDetail } from '../services/api';
-import type { PickRecord, StatusInfo, XhsSummaryRow, WeeklyAlphaResponse, WeeklyHistoryResponse, AIPickPerformanceResponse } from '../types/api';
+import type { PickRecord, StatusInfo, WeeklyAlphaResponse, WeeklyHistoryResponse, AIPickPerformanceResponse } from '../types/api';
 import { colors } from '../theme/tokens';
-
-const { TextArea } = Input;
-const { Paragraph } = Typography;
 
 const CONF_COLOR: Record<string, string> = { high: 'red', medium: 'orange', low: 'default' };
 const CONF_LABEL: Record<string, string> = { high: '高确信', medium: '中等', low: '低' };
-// antd 预设橙/绿标签的文字色对比度仅3.3~3.4:1（不达WCAG AA），覆盖为同色相深色文字（≥7:1）
 const TAG_TEXT_FIX = {
   orange: { color: '#873800' },
   green: { color: '#135200' },
@@ -36,18 +32,6 @@ const AIPick: React.FC = () => {
   const [performance, setPerformance] = useState<AIPickPerformanceResponse | null>(null);
   const [running, setRunning] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
-
-  // 小红书配置弹窗
-  const [xhsModalVisible, setXhsModalVisible] = useState(false);
-  const [cookieInput, setCookieInput] = useState('');
-  const [bloggersInput, setBloggersInput] = useState('');
-  const [savingXhs, setSavingXhs] = useState(false);
-  const [refreshingXhs, setRefreshingXhs] = useState(false);
-
-  // 博主观点总结
-  const [summaries, setSummaries] = useState<XhsSummaryRow[]>([]);
-  const [loadingSummaries, setLoadingSummaries] = useState(true);
-  const [generatingSummaries, setGeneratingSummaries] = useState(false);
 
   const fetchWeeklyAlpha = async () => {
     setLoadingWeekly(true);
@@ -114,43 +98,10 @@ const AIPick: React.FC = () => {
     }
   };
 
-  const fetchSummaries = async () => {
-    setLoadingSummaries(true);
-    try {
-      const res = await aiPickApi.getXhsSummaries();
-      setSummaries(res.data);
-    } catch {
-      // 总结读取失败不阻塞页面
-    } finally {
-      setLoadingSummaries(false);
-    }
-  };
-
-  const generateSummaries = async (silent: boolean) => {
-    if (!status?.ai_configured) {
-      if (!silent) message.warning('请先在 config/config.json 配置 ai_provider 再生成总结');
-      return;
-    }
-    setGeneratingSummaries(true);
-    try {
-      const res = await aiPickApi.generateXhsSummaries();
-      const ok = res.data.summaries?.length || 0;
-      const fail = res.data.errors?.length || 0;
-      message.success(`博主总结完成：${ok}位成功${fail ? `，${fail}位失败` : ''}`);
-      await fetchSummaries();
-    } catch (error) {
-      const detail = errDetail(error, '博主总结生成失败');
-      message.error(String(detail).slice(0, 120));
-    } finally {
-      setGeneratingSummaries(false);
-    }
-  };
-
   useEffect(() => {
     fetchWeeklyAlpha();
     fetchStatus();
     fetchHistory();
-    fetchSummaries();
   }, []);
 
   const handleRun = () => {
@@ -159,8 +110,8 @@ const AIPick: React.FC = () => {
       return;
     }
     Modal.confirm({
-      title: '运行AI选股？',
-      content: '将拉取候选池行情与新闻、结合小红书内容调用大模型分析，耗时约1-3分钟，并消耗少量API额度。',
+      title: '运行全产业链AI选股？',
+      content: '将拉取候选池行情与新闻、结合产业链卡点逻辑调用大模型深度分析，耗时约1-3分钟。',
       okText: '开始分析',
       onOk: async () => {
         setRunning(true);
@@ -178,64 +129,6 @@ const AIPick: React.FC = () => {
     });
   };
 
-  const openXhsModal = async () => {
-    try {
-      const res = await aiPickApi.getXhsConfig();
-      setCookieInput(''); // 出于安全不回显已存Cookie，留空=保持不变
-      setBloggersInput((res.data.bloggers || [])
-        .map((b) => `${b.name}|${b.url}`).join('\n'));
-      setXhsModalVisible(true);
-    } catch {
-      message.error('配置读取失败');
-    }
-  };
-
-  const handleSaveXhs = async () => {
-    const bloggers = bloggersInput
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const [name, url] = line.split('|');
-        return { name: (name || '').trim(), url: (url || '').trim() };
-      })
-      .filter((b) => b.url);
-
-    if (bloggers.length === 0 && !cookieInput.trim()) {
-      message.warning('请至少填写博主链接或Cookie');
-      return;
-    }
-    setSavingXhs(true);
-    try {
-      await aiPickApi.saveXhsConfig({
-        cookie: cookieInput.trim() ? cookieInput.trim() : undefined,
-        bloggers,
-      });
-      message.success('小红书配置已保存');
-      setXhsModalVisible(false);
-      fetchStatus();
-    } catch {
-      message.error('保存失败');
-    } finally {
-      setSavingXhs(false);
-    }
-  };
-
-  const handleRefreshXhs = async () => {
-    setRefreshingXhs(true);
-    try {
-      const res = await aiPickApi.refreshXhs();
-      const total = (res.data.bloggers || []).reduce((s, b) => s + (b.count || 0), 0);
-      message.success(`抓取完成：${total}条笔记，新增${res.data.new_posts}条入库`);
-      fetchStatus();
-      generateSummaries(true);   // 抓取成功后自动生成博主总结（未配AI时静默跳过）
-    } catch (error) {
-      message.error(errDetail(error, '抓取失败'));
-    } finally {
-      setRefreshingXhs(false);
-    }
-  };
-
   const grouped = history.reduce<Record<string, PickRecord[]>>((acc, r) => {
     (acc[r.run_date] = acc[r.run_date] || []).push(r);
     return acc;
@@ -243,7 +136,7 @@ const AIPick: React.FC = () => {
 
   return (
     <div>
-      <h2>🤖 AI选股</h2>
+      <h2>🦅 精选标的 · 硬科技量化 TOP 5</h2>
 
       {/* ===== 周度美股硬科技选股 · Alpha TOP 5 猛禽池 ===== */}
       <Card
@@ -315,7 +208,7 @@ const AIPick: React.FC = () => {
                     }
                     extra={
                       <Space size={2}>
-                        <Tooltip title="跳转个股深度分析">
+                        <Tooltip title="跳转5数操盘卡">
                           <Button
                             type="text"
                             size="small"
@@ -340,8 +233,8 @@ const AIPick: React.FC = () => {
                     </div>
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-                      <span style={{ color: colors.textSecondary, fontSize: 12 }}>现价</span>
-                      <span style={{ fontSize: 16, fontWeight: 'bold' }}>${item.current_price}</span>
+                      <span style={{ color: colors.textSecondary, fontSize: 12 }}>当前真实价</span>
+                      <span style={{ fontSize: 18, fontWeight: 'bold' }}>${item.current_price}</span>
                     </div>
 
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -351,28 +244,29 @@ const AIPick: React.FC = () => {
                       </Tag>
                     </div>
 
-                    <div style={{ fontSize: 11, color: colors.textSecondary, marginBottom: 8, lineHeight: 1.6 }}>
-                      <div>动量: <b>{item.momentum_score}</b> | 超跌: <b>{item.sweetspot_score}</b></div>
-                      <div>RSI: <b>{item.rsi}</b> | 模拟胜率: <b style={{ color: item.win_rate >= 60 ? colors.profit : undefined }}>{item.win_rate}%</b></div>
-                      {(item.forward_pe != null || item.upside_pct != null) && (
-                        <div>
-                          {item.forward_pe != null && <span>远期PE: <b>{item.forward_pe}</b> </span>}
-                          {item.upside_pct != null && (
-                            <span>| 目标价空间: <b style={{ color: item.upside_pct >= 0 ? colors.profit : colors.loss }}>{item.upside_pct >= 0 ? '+' : ''}{item.upside_pct}%</b></span>
-                          )}
-                        </div>
-                      )}
+                    <div style={{ background: colors.bgLight, padding: '8px 10px', borderRadius: 6, fontSize: 12, marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                        <span style={{ color: colors.textSecondary }}>动量得分</span>
+                        <b>{item.momentum_score}</b>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                        <span style={{ color: colors.textSecondary }}>买入甜点区</span>
+                        <b>{item.sweetspot_score}</b>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: colors.textSecondary }}>回测胜率</span>
+                        <b style={{ color: colors.profit }}>{item.win_rate}%</b>
+                      </div>
                     </div>
 
-                    <div style={{ background: colors.bgLight, padding: '6px 8px', borderRadius: 6, fontSize: 11 }}>
-                      <div style={{ color: colors.primary, fontWeight: 600, marginBottom: 2 }}>
-                        💡 线性买入: ${item.linear_buy}
+                    <div style={{ fontSize: 12, borderTop: `1px dashed ${colors.border}`, paddingTop: 6 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: colors.textSecondary }}>建议买点:</span>
+                        <b style={{ color: colors.primary }}>${item.linear_buy}</b>
                       </div>
-                      <div style={{ color: colors.textSecondary }}>
-                        止盈: ${item.linear_profit} (+15%)
-                      </div>
-                      <div style={{ color: colors.textSecondary }}>
-                        止损: ${item.linear_stop} (-8%)
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: colors.textSecondary }}>止盈目标:</span>
+                        <b style={{ color: colors.profit }}>${item.linear_profit}</b>
                       </div>
                     </div>
                   </Card>
@@ -381,25 +275,25 @@ const AIPick: React.FC = () => {
             })}
           </Row>
         ) : (
-          <div style={{ textAlign: 'center', padding: 24, color: colors.textSecondary }}>
-            {loadingWeekly ? <Spin tip="正在读取最新周报数据..." /> : '暂无周度选股数据，请点击右上角「一键全市场量化扫描」'}
+          <div style={{ textAlign: 'center', padding: 40, color: colors.textSecondary }}>
+            {loadingWeekly ? '正在拉取猛禽池数据...' : '暂无数据，请点击右上角「一键全市场量化扫描」'}
           </div>
         )}
       </Card>
 
-      {/* ===== 上期猛禽池战绩复盘 ===== */}
-      {weeklyAlpha?.battle_report && (
+      {/* ===== 上周实盘复盘战报 ===== */}
+      {weeklyAlpha?.battle_report && weeklyAlpha.battle_report.picks && (
         <Card
           title={
-            <span>
-              📊 上期猛禽池战绩复盘
-              <Tag color={weeklyAlpha.battle_report.avg_return_pct >= 0 ? 'green' : 'red'} style={{ marginLeft: 8, fontWeight: 'bold' }}>
-                等权组合: {weeklyAlpha.battle_report.avg_return_pct >= 0 ? '+' : ''}{weeklyAlpha.battle_report.avg_return_pct}%
+            <Space wrap>
+              <span>⚔️ 上期猛禽池战绩复盘</span>
+              <Tag color={weeklyAlpha.battle_report.avg_return_pct >= 0 ? 'green' : 'red'}>
+                平均收益: {weeklyAlpha.battle_report.avg_return_pct >= 0 ? '+' : ''}{weeklyAlpha.battle_report.avg_return_pct}%
               </Tag>
-              <Tag color="blue">
+              <Tag color={weeklyAlpha.battle_report.win_rate >= 50 ? 'green' : 'orange'}>
                 胜率: {weeklyAlpha.battle_report.win_rate}% ({weeklyAlpha.battle_report.win_count}胜{weeklyAlpha.battle_report.loss_count}负)
               </Tag>
-            </span>
+            </Space>
           }
           style={{ marginBottom: 20, borderRadius: 8 }}
         >
@@ -434,33 +328,21 @@ const AIPick: React.FC = () => {
         </Card>
       )}
 
-      {/* ===== 配置状态 ===== */}
+      {/* ===== AI 产业链深度投研 ===== */}
       {status && !status.ai_configured && (
         <Alert
           type="warning"
           showIcon
           style={{ marginBottom: 8 }}
-          message="AI供应商未配置"
+          message="AI大模型未配置"
           description={
             <div style={{ fontSize: 13 }}>
-              请编辑 <b>config/config.json</b>，添加 ai_provider 字段（该文件不会提交到git）：
-              <Paragraph copyable style={{ margin: '8px 0 0', fontSize: 12, background: colors.bgLight, padding: 8 }}>
-                {`"ai_provider": {"base_url": "https://openrouter.ai/api/v1", "api_key": "你的key", "model": "厂商/模型ID"}`}
-              </Paragraph>
+              请在 <b>config/config.json</b> 中配置 ai_provider 字段以启用深度投研分析。
             </div>
           }
         />
       )}
-
-      {status && !status.xhs_cookie_set && (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="小红书源未配置，仅基于行情与新闻选股"
-        />
-      )}
-      <Card style={{ marginBottom: 16 }}>
+      <Card title="🧠 AI 产业链深度投研选股" style={{ marginBottom: 16 }}>
         <Space size="large" wrap align="center">
           <Button
             type="primary"
@@ -470,183 +352,83 @@ const AIPick: React.FC = () => {
             loading={running}
             disabled={!status?.ai_configured}
           >
-            {running ? 'AI分析中…（约1-3分钟）' : '开始AI选股'}
+            {running ? 'AI产业链深度分析中…（约1-3分钟）' : '运行全产业链AI选股'}
           </Button>
           <Descriptions column={1} size="small" style={{ flex: 1, minWidth: 320 }}>
-            <Descriptions.Item label="AI模型">
+            <Descriptions.Item label="AI投研模型">
               {status?.ai_configured
                 ? <Tag color="green" style={TAG_TEXT_FIX.green}>{status.ai_model}</Tag>
                 : <Tag color="red">未配置</Tag>}
             </Descriptions.Item>
-            <Descriptions.Item label="小红书">
-              <Space>
-                <Tag color={status?.xhs_cookie_set ? 'green' : 'default'} style={status?.xhs_cookie_set ? TAG_TEXT_FIX.green : undefined}>
-                  {status?.xhs_cookie_set ? 'Cookie已配' : '小红书源未配置，仅基于行情与新闻选股'}
-                </Tag>
-                <span>{status?.bloggers?.length || 0}个博主 · 缓存{status?.cached_posts || 0}条</span>
-              </Space>
+            <Descriptions.Item label="候选标的池">
+              全美35-40支顶级AI算力、半导体与光通信龙头
             </Descriptions.Item>
             <Descriptions.Item label="上次运行">
               {status?.last_run_date || '从未运行'}
             </Descriptions.Item>
           </Descriptions>
-          <Space direction="vertical">
-            <Button icon={<SettingOutlined />} onClick={openXhsModal}>小红书设置</Button>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={handleRefreshXhs}
-              loading={refreshingXhs}
-              disabled={!status?.xhs_cookie_set}
-            >
-              抓取最新帖子
-            </Button>
-          </Space>
         </Space>
         <div style={{ color: colors.textSecondary, fontSize: 12, marginTop: 12 }}>
-          分析框架：产业链卡点 → 定价权 → 验证链 → 压力测试。候选池默认覆盖AI算力/半导体/光通信25只美股，
-          可在config.json的ai_provider.universe字段自定义。输出仅供研究参考，不构成投资建议。
+          分析框架：产业链卡点 → 定价权 → 验证链 → 压力测试。输出仅供研究参考，不构成投资建议。
         </div>
       </Card>
 
-      {/* ===== 博主观点总结 ===== */}
-      <Card
-        title="📝 博主观点总结"
-        style={{ marginBottom: 16 }}
-        extra={
-          <Button
-            size="small"
-            icon={<FileTextOutlined />}
-            onClick={() => generateSummaries(false)}
-            loading={generatingSummaries}
-            disabled={!status?.ai_configured}
-          >
-            {generatingSummaries ? '总结生成中…' : '重新总结'}
-          </Button>
-        }
-      >
-        {loadingSummaries ? (
-          <div style={{ textAlign: 'center', padding: 30 }}><Spin /></div>
-        ) : summaries.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 24, color: colors.textSecondary }}>
-            还没有博主总结——抓取最新帖子后会自动生成每位博主的观点总结
-          </div>
-        ) : (
-          summaries.map((s) => (
-            <Card
-              key={s.blogger_name}
-              type="inner"
-              title={
-                <Space>
-                  <b>{s.blogger_name}</b>
-                  <Tag>{s.posts_count}条帖子</Tag>
-                  {(s.period_start || s.period_end) && (
-                    <span style={{ color: colors.textSecondary, fontSize: 12 }}>{s.period_start} ~ {s.period_end}</span>
-                  )}
-                </Space>
-              }
-              style={{ marginBottom: 12 }}
-            >
-              <Paragraph style={{ marginBottom: 4 }}>{s.summary_text}</Paragraph>
-              <div style={{ color: colors.textSecondary, fontSize: 12 }}>
-                生成于 {s.created_at ? s.created_at.replace('T', ' ').slice(0, 16) : '--'}
-              </div>
-            </Card>
-          ))
-        )}
-      </Card>
-
-      {/* ===== AI 选股历史战绩（20/60 交易日 · 按置信度分层，只观测不调参） ===== */}
+      {/* ===== 历史战绩 ===== */}
       {performance && performance.total_picks > 0 && (
         <Card
           title={
             <Space wrap>
               <span>📊 历史战绩（20 / 60 交易日复盘 · 按置信度分层）</span>
               <Tag color="blue">累计记录 {performance.total_picks} 笔</Tag>
-              <Tag color="purple">只观测统计 · 不反向调参</Tag>
+              {performance.overall?.d20?.win_rate != null && (
+                <Tag color={performance.overall.d20.win_rate >= 50 ? 'green' : 'orange'}>
+                  20日胜率 {performance.overall.d20.win_rate}% (均收益 {performance.overall.d20.avg_return_pct ?? 0}%)
+                </Tag>
+              )}
+              {performance.overall?.d60?.win_rate != null && (
+                <Tag color={performance.overall.d60.win_rate >= 50 ? 'green' : 'orange'}>
+                  60日胜率 {performance.overall.d60.win_rate}% (均收益 {performance.overall.d60.avg_return_pct ?? 0}%)
+                </Tag>
+              )}
             </Space>
           }
-          style={{ marginBottom: 16, borderRadius: 8 }}
+          style={{ marginBottom: 16 }}
         >
-          <Row gutter={[12, 12]}>
+          <Row gutter={16}>
             {(['high', 'medium', 'low'] as const).map((tierKey) => {
-              const tier = performance.by_confidence?.[tierKey];
-              if (!tier) return null;
+              const t = performance.by_confidence?.[tierKey];
+              if (!t || t.total_picks === 0) return null;
               return (
                 <Col xs={24} md={8} key={tierKey}>
-                  <Card size="small" style={{ background: colors.bgLight, borderRadius: 6 }}>
-                    <div style={{ marginBottom: 6 }}>
-                      <Tag
-                        color={CONF_COLOR[tierKey]}
-                        style={CONF_COLOR[tierKey] === 'orange' ? TAG_TEXT_FIX.orange : undefined}
-                      >
-                        {CONF_LABEL[tierKey]} ({tier.total_picks}笔)
-                      </Tag>
-                    </div>
-                    <div style={{ fontSize: 12, lineHeight: 1.8 }}>
-                      <div>
-                        <b>20交易日：</b>
-                        {tier.d20.win_rate != null ? (
-                          <span>
-                            胜率 <b style={{ color: tier.d20.win_rate >= 50 ? colors.profit : colors.loss }}>{tier.d20.win_rate}%</b>
-                            {' '}({tier.d20.win_count}/{tier.d20.matured_count}，均值{' '}
-                            <b style={{ color: (tier.d20.avg_return_pct ?? 0) >= 0 ? colors.profit : colors.loss }}>
-                              {(tier.d20.avg_return_pct ?? 0) >= 0 ? '+' : ''}{tier.d20.avg_return_pct}%
-                            </b>)
-                          </span>
-                        ) : (
-                          <span style={{ color: colors.textSecondary }}>暂无已满20交易日样本</span>
-                        )}
-                        {tier.d20.pending_count > 0 && (
-                          <Tag style={{ marginLeft: 6 }}>pending {tier.d20.pending_count}笔</Tag>
-                        )}
-                      </div>
-                      <div>
-                        <b>60交易日：</b>
-                        {tier.d60.win_rate != null ? (
-                          <span>
-                            胜率 <b style={{ color: tier.d60.win_rate >= 50 ? colors.profit : colors.loss }}>{tier.d60.win_rate}%</b>
-                            {' '}({tier.d60.win_count}/{tier.d60.matured_count}，均值{' '}
-                            <b style={{ color: (tier.d60.avg_return_pct ?? 0) >= 0 ? colors.profit : colors.loss }}>
-                              {(tier.d60.avg_return_pct ?? 0) >= 0 ? '+' : ''}{tier.d60.avg_return_pct}%
-                            </b>)
-                          </span>
-                        ) : (
-                          <span style={{ color: colors.textSecondary }}>暂无已满60交易日样本</span>
-                        )}
-                        {tier.d60.pending_count > 0 && (
-                          <Tag style={{ marginLeft: 6 }}>pending {tier.d60.pending_count}笔</Tag>
-                        )}
-                      </div>
-                    </div>
+                  <Card size="small" type="inner" title={<Tag color={CONF_COLOR[tierKey]}>{CONF_LABEL[tierKey]}组 ({t.total_picks}只)</Tag>}>
+                    <p style={{ margin: '4px 0' }}>
+                      <b>20日:</b> 胜率 {t.d20?.win_rate != null ? `${t.d20.win_rate}%` : '待满期'}
+                      {' '}(均收益 {t.d20?.avg_return_pct != null ? `${t.d20.avg_return_pct}%` : '--'})
+                    </p>
+                    <p style={{ margin: '4px 0 0' }}>
+                      <b>60日:</b> 胜率 {t.d60?.win_rate != null ? `${t.d60.win_rate}%` : '待满期'}
+                      {' '}(均收益 {t.d60?.avg_return_pct != null ? `${t.d60.avg_return_pct}%` : '--'})
+                    </p>
                   </Card>
                 </Col>
               );
             })}
           </Row>
-          {performance.note && (
-            <div style={{ marginTop: 8, fontSize: 12, color: colors.textSecondary }}>
-              注：{performance.note}
-            </div>
-          )}
         </Card>
       )}
 
-      {/* ===== 历史结果 ===== */}
+      {/* ===== 历史选股记录 ===== */}
+      <h3 style={{ marginTop: 24, marginBottom: 12 }}>📋 历期选股结果</h3>
       {loadingHistory ? (
-        <div style={{ textAlign: 'center', padding: 60 }}><Spin /></div>
+        <div style={{ textAlign: 'center', padding: 50 }}><Spin size="large" /></div>
       ) : Object.keys(grouped).length === 0 ? (
-        <Card>
-          <div style={{ textAlign: 'center', padding: 40, color: colors.textSecondary }}>
-            还没有选股记录——点击上方「开始AI选股」跑第一次分析
-          </div>
-        </Card>
+        <Card><div style={{ textAlign: 'center', padding: 30, color: colors.textSecondary }}>暂无历史选股记录</div></Card>
       ) : (
         Object.entries(grouped).map(([runDate, picks]) => {
-          const commentary = picks.find((p) => p.market_commentary)?.market_commentary;
           const tracked = picks.filter((p) => p.return_pct != null);
-          const winCount = tracked.filter((p) => (p.return_pct ?? 0) > 0).length;
+          const winCount = tracked.filter((p) => (p.return_pct || 0) > 0).length;
           const avgRet = tracked.length > 0
-            ? Number((tracked.reduce((s, p) => s + (p.return_pct ?? 0), 0) / tracked.length).toFixed(2))
+            ? Math.round((tracked.reduce((sum, p) => sum + (p.return_pct || 0), 0) / tracked.length) * 10) / 10
             : null;
           return (
             <Card
@@ -664,14 +446,6 @@ const AIPick: React.FC = () => {
               style={{ marginBottom: 16 }}
               extra={<Tooltip title="按rank排序"><Tag>{picks.length}只</Tag></Tooltip>}
             >
-              {commentary && (
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginBottom: 12 }}
-                  message={`板块判断：${commentary}`}
-                />
-              )}
               {picks.map((p) => (
                 <Card
                   key={p.id}
@@ -703,7 +477,7 @@ const AIPick: React.FC = () => {
                         icon={<LineChartOutlined />}
                         onClick={() => navigate(`/analysis?code=${p.stock_code}&name=${encodeURIComponent(p.stock_name)}&market=US`)}
                       >
-                        深度分析
+                        5数操盘卡
                       </Button>
                       <Button
                         size="small"
@@ -727,42 +501,6 @@ const AIPick: React.FC = () => {
           );
         })
       )}
-
-      {/* ===== 小红书设置弹窗 ===== */}
-      <Modal
-        title="小红书接入设置"
-        open={xhsModalVisible}
-        onCancel={() => setXhsModalVisible(false)}
-        onOk={handleSaveXhs}
-        confirmLoading={savingXhs}
-        okText="保存"
-        width="92%"
-        style={{ maxWidth: 560 }}
-      >
-        <p style={{ fontSize: 13 }}>
-          博主列表（每行一条，格式：<code>显示名|主页链接</code>）：
-        </p>
-        <TextArea
-          rows={4}
-          placeholder={'半导体老张|https://www.xiaohongshu.com/user/profile/xxxxxxx'}
-          value={bloggersInput}
-          onChange={(e) => setBloggersInput(e.target.value)}
-        />
-        <p style={{ fontSize: 13, marginTop: 16 }}>
-          登录Cookie（浏览器打开小红书 → F12 → Network → 任一请求 → 复制Cookie请求头的值；留空则保持原值。约30天过期需更新）：
-        </p>
-        <TextArea
-          rows={3}
-          placeholder="粘贴Cookie…"
-          value={cookieInput}
-          onChange={(e) => setCookieInput(e.target.value)}
-        />
-        <Alert
-          type="info"
-          style={{ marginTop: 12, fontSize: 12 }}
-          message="非官方接口：小红书反爬升级可能导致抓取失效，届时重新更新Cookie或改用其他方案。仅抓取公开笔记标题/简介作参考输入。"
-        />
-      </Modal>
     </div>
   );
 };

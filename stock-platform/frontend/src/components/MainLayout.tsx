@@ -4,7 +4,6 @@ import {
   HomeOutlined,
   LineChartOutlined,
   FundOutlined,
-  ExperimentOutlined,
   RobotOutlined,
   MenuOutlined
 } from '@ant-design/icons';
@@ -39,14 +38,9 @@ const MainLayout: React.FC<MainLayoutProps> = ({ children }) => {
       label: '持仓管理',
     },
     {
-      key: '/backtest',
-      icon: <ExperimentOutlined />,
-      label: '策略回测',
-    },
-    {
       key: '/ai-pick',
       icon: <RobotOutlined />,
-      label: 'AI选股',
+      label: '精选标的',
     },
   ];
 
