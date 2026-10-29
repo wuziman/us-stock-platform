@@ -56,6 +56,13 @@ class TradeActionCard(BaseModel):
     stop_loss_price: float = 0.0
     one_sentence_reason: str = ""
     risk_reward_ratio: str = "1.88:1"
+    # 周线双底座分级操盘体系（战役二接入）
+    buy_tier1: Optional[float] = 0.0
+    buy_tier2: Optional[float] = 0.0
+    tier1_position_pct: str = "0%"
+    tier2_position_pct: str = "0%"
+    total_position_pct: str = "0%"
+    priority_score: Optional[float] = None
 
 
 class AnalysisResponse(BaseModel):

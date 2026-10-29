@@ -111,6 +111,7 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+*.png
 
 # OS files
 .DS_Store

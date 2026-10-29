@@ -275,6 +275,12 @@ export interface AnalysisResult {
     stop_loss_price: number;
     one_sentence_reason: string;
     risk_reward_ratio: string;
+    buy_tier1?: number;
+    buy_tier2?: number;
+    tier1_position_pct?: string;
+    tier2_position_pct?: string;
+    total_position_pct?: string;
+    priority_score?: number;
   };
   price_levels: {
     current_price: number | null;
@@ -649,6 +655,13 @@ export interface RadarItem {
   status: 'TRIGGERED' | 'APPROACHING' | 'WAITING';
   status_label: string;
   status_color: string;
+  // 战役三升级：周线双底座与截面优先级
+  buy_tier1?: number;
+  buy_tier2?: number;
+  tier1_position_pct?: string;
+  tier2_position_pct?: string;
+  total_position_pct?: string;
+  priority_score?: number;
 }
 
 // ===== 模拟实战记账 =====

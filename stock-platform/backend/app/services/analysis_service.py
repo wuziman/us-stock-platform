@@ -13,7 +13,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import requests
-from typing import Dict, Tuple, Any, List
+from typing import Dict, Tuple, Any, List, Optional
 from .stock_service import StockService, _get_cn_session, _resolve_cn_symbol
 from .tech_score import calculate_tech_score
 from ..utils.indicators import calculate_all_indicators
@@ -200,6 +200,8 @@ class AnalysisService:
     def __init__(self):
         self.stock_service = StockService()
         self.api_keys = _load_api_keys()
+        from .weekly_support_service import WeeklySupportService
+        self.weekly_support_service = WeeklySupportService()
 
     def _resolve_market_regime(self, market: str) -> Tuple[str, str, Dict[str, float]]:
         """识别大盘基准当前所处的牛熊状态 (BULL/BEAR/SIDEWAYS) 并返回对应的自适应最优权重"""
@@ -313,17 +315,39 @@ class AnalysisService:
             recommendation['action'] = "观望"
             recommendation['confidence'] = "高"
 
+        # 实时穿透探测盘前/盘后价格（消除日K收盘价在跳空事件中的滞后盲区）
+        effective_current_price = float(latest['Close'])
+        try:
+            rt_quote = self.stock_service.get_realtime_quote(stock_code, market)
+            if rt_quote and rt_quote.get('price') and float(rt_quote['price']) > 0:
+                effective_current_price = float(rt_quote['price'])
+        except Exception as e:
+            logger.info(f"实时价格穿透降级为日K收盘价: {e}")
+
         # 计算三策略点位（线性/非线性/MACD + ATR动态点位 + 保本触发位）
         price_levels = self._calculate_both_strategies(df_with_indicators, latest, market)
 
-        # 构建极简行动决策卡（傻瓜式5数交易卡）
+        # 战役二升级：计算周线双底座防守中枢
+        weekly_support = None
+        try:
+            weekly_support = self.weekly_support_service.calculate_weekly_supports(
+                stock_code,
+                current_price_override=effective_current_price,
+                market=market,
+            )
+        except Exception as e:
+            logger.info(f"计算周线双底座降级: {e}")
+
+        # 构建极简行动决策卡（傻瓜式5数交易卡 + 周线双底座分级操盘）
         action_card = self._build_action_card(
-            current_price=float(latest['Close']),
+            current_price=effective_current_price,
             total_score=total_score,
             price_levels=price_levels,
             recommendation=recommendation,
             earnings_radar=earnings_radar,
             stock_code=stock_code,
+            weekly_support=weekly_support,
+            macro_score=macro_score,
         )
 
         return {
@@ -358,8 +382,10 @@ class AnalysisService:
         recommendation: Dict,
         earnings_radar: Dict,
         stock_code: str,
+        weekly_support: Optional[Dict] = None,
+        macro_score: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """构建极简行动决策卡（纯净5大核心数字+大白话行动指南）"""
+        """构建极简行动决策卡（纯净5大核心数字+大白话行动指南+周线双底座分级操盘体系）"""
         is_leveraged = stock_code.upper() in ("SOXL", "SOXS", "TQQQ", "SQQQ", "UPRO", "SPXU")
         linear_levels = price_levels.get("linear", {})
         raw_buy = linear_levels.get("buy") or (current_price * 0.95)
@@ -371,16 +397,90 @@ class AnalysisService:
         reward = max(0.01, profit_px - buy_px)
         rr_str = f"{round(reward / risk, 2)}:1"
 
-        if earnings_radar.get("is_imminent"):
+        # 战役二：周线双底座参数提取
+        buy_tier1 = 0.0
+        buy_tier2 = 0.0
+        tier1_pos = "0%"
+        tier2_pos = "0%"
+        total_pos = "0%"
+        has_weekly = False
+        t1 = 0.0
+        t2 = 0.0
+
+        if weekly_support and isinstance(weekly_support, dict):
+            t1 = float(weekly_support.get("tier_1") or 0.0)
+            t2 = float(weekly_support.get("tier_2") or 0.0)
+            if t1 > 0 and t2 > 0 and t1 > t2:
+                has_weekly = True
+                buy_tier1 = round(t1, 2)
+                buy_tier2 = round(t2, 2)
+
+        # 截面综合优先级评分（0~100分）
+        # 门禁机制：四维评分 < 4.0 强制归 0 淘汰
+        priority_score = None
+        if total_score is not None:
+            if total_score < 4.0:
+                priority_score = 0.0
+            else:
+                quality_part = total_score * 10.0
+                macro_part = (macro_score if macro_score is not None else 5.0) * 10.0
+                if has_weekly and current_price > 0:
+                    dist_to_t2 = max(0.0, (current_price - t2) / current_price * 100.0)
+                    safety_margin = max(0.0, min(100.0, 100.0 - dist_to_t2 * 1.0))
+                else:
+                    safety_margin = 50.0
+                # 4D综合质地分 (50%) + 周线底座安全边际 (40%) + 宏观低风控溢价 (10%)
+                priority_score = round(
+                    quality_part * 0.50 + safety_margin * 0.40 + macro_part * 0.10, 1
+                )
+
+        # 1. 暴跌与破位场景：接驳周线双底座分级操盘体系（终结 buy_price = 0 的机械推卸）
+        if current_price <= stop_px or (has_weekly and current_price <= buy_px):
+            # 若接驳了周线底座，且现价仍在周线终极铁底缓冲位上方 (t2 * 0.95)
+            if has_weekly and current_price > (t2 * 0.95):
+                action_type = "TIERED_DIP_BUY"
+                action_label = "周线底座回踩·分级埋伏"
+                tier1_pos = "10%"
+                tier2_pos = "15%"
+                total_pos = "25%"
+                position_pct = "25%"
+                buy_px = buy_tier1
+                stop_px = round(t2 * 0.96, 2)
+                profit_px = round(max(profit_px, current_price * 1.15), 2)
+                risk = max(0.01, buy_px - stop_px)
+                reward = max(0.01, profit_px - buy_px)
+                rr_str = f"{round(reward / risk, 2)}:1"
+                one_sentence_reason = (
+                    f"日线虽破位但现价已砸入周线第一底座(${round(t1, 2)})，"
+                    f"建议先打10%试探底仓，并在52周年度大底(${round(t2, 2)})挂单15%防守"
+                )
+            else:
+                # 穿透周线终极铁底或无周线底座时，触发死卡断路保护
+                action_type = "AVOID_GAP_DOWN"
+                action_label = "🚨 跌破止损·严禁接刀"
+                position_pct = "0%"
+                buy_px = 0.0
+                one_sentence_reason = "现价已直接击穿原止损线，恶性跳空破位，原买点报废失效，严禁抄底接飞刀"
+                rr_str = "0:1"
+        # 2. 财报前夕风控保护
+        elif earnings_radar.get("is_imminent"):
             action_type = "WAIT_AND_SEE"
             action_label = "财报避险·观望"
             one_sentence_reason = "3天内面临重磅财报公布，波动率极高，严禁左侧博弈，待业绩落地后再择机入场"
             position_pct = "0%"
+        # 3. 跌破初级买点支撑但未破止损的缓冲状态 (无周线数据时的降级缓冲)
+        elif current_price < buy_px:
+            action_type = "WAIT_AND_SEE"
+            action_label = "跌破初级支撑·观望企稳"
+            one_sentence_reason = f"现价(${round(current_price, 2)})已跌破原买点支撑(${buy_px})，正在测试下轨与止损线(${stop_px})，严禁盲目挂单，观望企稳"
+            position_pct = "0%"
+        # 4. 评分极低或明确卖出
         elif total_score < 3.5 or recommendation.get("action") == "卖出":
             action_type = "SELL"
             action_label = "坚决离场"
             one_sentence_reason = f"多头指标破位且综合评分仅{total_score}分，趋势向下，严禁逆势抄底"
             position_pct = "0%"
+        # 5. 评分强势区
         elif total_score >= 6.5:
             if abs(current_price - buy_px) / current_price < 0.015:
                 action_type = "BUY_NOW"
@@ -391,11 +491,16 @@ class AnalysisService:
                 action_label = "挂单等回踩"
                 one_sentence_reason = f"动量良好(评分{total_score}分)，但现价偏离支撑，建议挂单${buy_px}等回踩分批建仓"
             position_pct = "15%" if is_leveraged else ("30%" if total_score >= 8.0 else "20%")
+            total_pos = position_pct
+            tier1_pos = position_pct
+        # 6. 中性整理区
         else:
             action_type = "WAIT_AND_SEE"
             action_label = "挂单等深度回踩"
             one_sentence_reason = f"处于整理蓄势期(评分{total_score}分)，严禁追高，仅建议在强支撑${buy_px}轻仓埋伏"
             position_pct = "10%" if is_leveraged else "15%"
+            total_pos = position_pct
+            tier1_pos = position_pct
 
         return {
             "action_type": action_type,
@@ -407,6 +512,12 @@ class AnalysisService:
             "stop_loss_price": stop_px,
             "one_sentence_reason": one_sentence_reason,
             "risk_reward_ratio": rr_str,
+            "buy_tier1": buy_tier1,
+            "buy_tier2": buy_tier2,
+            "tier1_position_pct": tier1_pos,
+            "tier2_position_pct": tier2_pos,
+            "total_position_pct": total_pos,
+            "priority_score": priority_score,
         }
 
     # ============================================

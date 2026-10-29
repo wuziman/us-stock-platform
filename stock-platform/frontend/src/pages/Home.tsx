@@ -525,8 +525,8 @@ const Home: React.FC = () => {
             title={
               <span>
                 🎯 自选股与核心标的买入雷达
-                <Tag color="cyan" style={{ marginLeft: 8, fontWeight: 'normal' }}>
-                  按“距离买点最近”实时排序
+                <Tag color="volcano" style={{ marginLeft: 8, fontWeight: 'bold' }}>
+                  🔥 截面优先级排行榜 (周线底座 + 安全边际)
                 </Tag>
               </span>
             }
@@ -537,7 +537,11 @@ const Home: React.FC = () => {
             }
           >
             <Table
-              dataSource={radarItems}
+              dataSource={[...radarItems].sort((a, b) => {
+                const scoreA = a.priority_score ?? (a.status === 'TRIGGERED' ? 95 : Math.max(10, Math.round(90 - Math.max(0, a.distance_pct))));
+                const scoreB = b.priority_score ?? (b.status === 'TRIGGERED' ? 95 : Math.max(10, Math.round(90 - Math.max(0, b.distance_pct))));
+                return scoreB - scoreA;
+              })}
               rowKey="stock_code"
               size="small"
               loading={radarLoading}
@@ -550,13 +554,17 @@ const Home: React.FC = () => {
                 {
                   title: '标的',
                   key: 'code',
-                  render: (_: unknown, r: RadarItem) => (
-                    <Space>
-                      <b>{r.stock_code}</b>
-                      <span style={{ fontSize: 12, color: colors.textSecondary }}>{r.stock_name}</span>
-                      <Tag color={r.market === 'A' ? 'red' : 'blue'}>{r.market === 'A' ? 'A股' : '美股'}</Tag>
-                    </Space>
-                  ),
+                  render: (_: unknown, r: RadarItem, index: number) => {
+                    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`;
+                    return (
+                      <Space>
+                        <span style={{ fontSize: index < 3 ? 16 : 13, fontWeight: 'bold' }}>{medal}</span>
+                        <b>{r.stock_code}</b>
+                        <span style={{ fontSize: 12, color: colors.textSecondary }}>{r.stock_name}</span>
+                        <Tag color={r.market === 'A' ? 'red' : 'blue'}>{r.market === 'A' ? 'A股' : '美股'}</Tag>
+                      </Space>
+                    );
+                  },
                 },
                 {
                   title: '当前现价',
@@ -575,26 +583,39 @@ const Home: React.FC = () => {
                   ),
                 },
                 {
-                  title: '建议买点',
-                  dataIndex: 'buy_price',
-                  key: 'buy_price',
-                  render: (v: number, r: RadarItem) => <b>{currencySymbol(r.market)}{v}</b>,
-                },
-                {
-                  title: '距离买点偏差',
-                  dataIndex: 'distance_pct',
-                  key: 'distance_pct',
-                  render: (v: number) => (
-                    <Tag color={v <= 0.5 ? 'green' : v <= 2.0 ? 'gold' : 'default'}>
-                      {v <= 0 ? `已跌破买点 (${v}%)` : `距买点 +${v}%`}
-                    </Tag>
+                  title: '周线第一底座(Tier 1)',
+                  key: 'buy_tier1',
+                  render: (_: unknown, r: RadarItem) => (
+                    <b style={{ color: colors.primary }}>
+                      {currencySymbol(r.market)}{r.buy_tier1 ?? r.buy_price}
+                    </b>
                   ),
                 },
                 {
-                  title: '推荐仓位',
-                  dataIndex: 'position_pct',
-                  key: 'position_pct',
-                  render: (v: string) => <Tag color="blue">{v}</Tag>,
+                  title: '52周终极大底(Tier 2)',
+                  key: 'buy_tier2',
+                  render: (_: unknown, r: RadarItem) => (
+                    <b style={{ color: colors.loss }}>
+                      {currencySymbol(r.market)}{r.buy_tier2 ?? (r.buy_price * 0.92).toFixed(2)}
+                    </b>
+                  ),
+                },
+                {
+                  title: '优先级得分',
+                  key: 'priority_score',
+                  render: (_: unknown, r: RadarItem) => {
+                    const score = r.priority_score ?? (
+                      r.status === 'TRIGGERED' ? 92 :
+                      r.status === 'APPROACHING' ? Math.max(70, Math.round(85 - r.distance_pct * 5)) :
+                      Math.max(25, Math.round(65 - r.distance_pct * 2))
+                    );
+                    const color = score >= 80 ? 'green' : score >= 65 ? 'blue' : 'gold';
+                    return (
+                      <Tag color={color} style={{ fontWeight: 'bold' }}>
+                        {score}分
+                      </Tag>
+                    );
+                  },
                 },
                 {
                   title: '雷达状态',
@@ -610,7 +631,7 @@ const Home: React.FC = () => {
                   key: 'action',
                   render: () => (
                     <Button size="small" type="primary" ghost>
-                      查看5数操盘卡
+                      查看双买点操盘卡
                     </Button>
                   ),
                 },

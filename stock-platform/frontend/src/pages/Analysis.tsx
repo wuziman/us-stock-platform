@@ -798,104 +798,167 @@ const Analysis: React.FC = () => {
 
       {selectedStock && (
         <>
-          {analysisResult?.action_card && (
-            <Card
-              style={{
-                marginBottom: 16,
-                border: `2px solid ${
-                  analysisResult.action_card.action_type === 'BUY_NOW' ? colors.success :
-                  analysisResult.action_card.action_type === 'BUY_ON_PULLBACK' ? colors.primary :
-                  analysisResult.action_card.action_type === 'SELL' ? colors.loss : colors.warning
-                }`,
-                borderRadius: 8,
-                boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <Tag
-                    color={
-                      analysisResult.action_card.action_type === 'BUY_NOW' ? 'green' :
-                      analysisResult.action_card.action_type === 'BUY_ON_PULLBACK' ? 'blue' :
-                      analysisResult.action_card.action_type === 'SELL' ? 'red' : 'orange'
-                    }
-                    style={{ fontSize: 16, padding: '4px 14px', fontWeight: 'bold' }}
-                  >
-                    {analysisResult.action_card.action_label}
-                  </Tag>
-                  <span style={{ fontSize: 15, fontWeight: 600 }}>
-                    {analysisResult.action_card.one_sentence_reason}
-                  </span>
-                </div>
-                <Space size="small" wrap>
-                  <Tag color="cyan" style={{ fontSize: 13, padding: '2px 8px' }}>
-                    盈亏比 {analysisResult.action_card.risk_reward_ratio}
-                  </Tag>
-                  <Button
-                    type="primary"
-                    icon={<ThunderboltOutlined />}
-                    style={{ background: colors.success, borderColor: colors.success }}
-                    loading={paperOpening}
-                    onClick={handleOpenPaperTrade}
-                  >
-                    📥 一键模拟买入 (Paper Trade)
-                  </Button>
-                  <Button
-                    icon={<TrophyOutlined />}
-                    onClick={() => {
-                      fetchPaperTradingData();
-                      setPaperDrawerVisible(true);
-                    }}
-                  >
-                    战绩看板 ({paperSummary?.win_rate_pct ?? 0}%胜率)
-                  </Button>
-                </Space>
-              </div>
+          {analysisResult?.action_card && (() => {
+            const card = analysisResult.action_card;
+            const isTiered = card.action_type === 'TIERED_DIP_BUY' || (Boolean(card.buy_tier1) && (card.buy_tier1 || 0) > 0);
+            const borderCol = isTiered ? colors.chartPurple :
+              card.action_type === 'BUY_NOW' ? colors.success :
+              card.action_type === 'BUY_ON_PULLBACK' ? colors.primary :
+              card.action_type === 'SELL' ? colors.loss : colors.warning;
+            const tagCol = isTiered ? 'purple' :
+              card.action_type === 'BUY_NOW' ? 'green' :
+              card.action_type === 'BUY_ON_PULLBACK' ? 'blue' :
+              card.action_type === 'SELL' ? 'red' : 'orange';
 
-              <Row gutter={[12, 12]}>
-                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
-                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
-                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>1. 当前现价</div>
-                    <div style={{ fontSize: 22, fontWeight: 'bold' }}>
-                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.current_price}
-                    </div>
-                  </Card>
-                </Col>
-                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
-                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
-                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>2. 建议买入价</div>
-                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.primary }}>
-                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.buy_price}
-                    </div>
-                  </Card>
-                </Col>
-                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
-                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
-                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>3. 推荐仓位</div>
-                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.warning }}>
-                      {analysisResult.action_card.position_pct}
-                    </div>
-                  </Card>
-                </Col>
-                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
-                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
-                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>4. 止盈获利点</div>
-                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.profit }}>
-                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.take_profit_price}
-                    </div>
-                  </Card>
-                </Col>
-                <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
-                  <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
-                    <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>5. 铁血止损点</div>
-                    <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.loss }}>
-                      {currencySymbol(selectedStock.market)}{analysisResult.action_card.stop_loss_price}
-                    </div>
-                  </Card>
-                </Col>
-              </Row>
-            </Card>
-          )}
+            return (
+              <Card
+                style={{
+                  marginBottom: 16,
+                  border: `2px solid ${borderCol}`,
+                  borderRadius: 8,
+                  boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <Tag
+                      color={tagCol}
+                      style={{ fontSize: 16, padding: '4px 14px', fontWeight: 'bold' }}
+                    >
+                      {card.action_label}
+                    </Tag>
+                    {card.priority_score != null && (
+                      <Tag color="volcano" style={{ fontSize: 13, padding: '3px 10px', fontWeight: 'bold' }}>
+                        🔥 抄底优先级: {card.priority_score}分
+                      </Tag>
+                    )}
+                    <span style={{ fontSize: 15, fontWeight: 600 }}>
+                      {card.one_sentence_reason}
+                    </span>
+                  </div>
+                  <Space size="small" wrap>
+                    <Tag color="cyan" style={{ fontSize: 13, padding: '2px 8px' }}>
+                      盈亏比 {card.risk_reward_ratio}
+                    </Tag>
+                    <Button
+                      type="primary"
+                      icon={<ThunderboltOutlined />}
+                      style={{ background: colors.success, borderColor: colors.success }}
+                      loading={paperOpening}
+                      onClick={handleOpenPaperTrade}
+                    >
+                      📥 一键模拟买入 (Paper Trade)
+                    </Button>
+                    <Button
+                      icon={<TrophyOutlined />}
+                      onClick={() => {
+                        fetchPaperTradingData();
+                        setPaperDrawerVisible(true);
+                      }}
+                    >
+                      战绩看板 ({paperSummary?.win_rate_pct ?? 0}%胜率)
+                    </Button>
+                  </Space>
+                </div>
+
+                {isTiered ? (
+                  <Row gutter={[12, 12]}>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>1. 当前现价</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold' }}>
+                          {currencySymbol(selectedStock.market)}{card.current_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>2. 买点一 (10%试探)</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.primary }}>
+                          {currencySymbol(selectedStock.market)}{card.buy_tier1 || card.buy_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>3. 买点二 (15%铁底)</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.chartPurple }}>
+                          {currencySymbol(selectedStock.market)}{card.buy_tier2 || card.buy_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>4. 规划总仓位</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.warning }}>
+                          {card.total_position_pct || card.position_pct}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>5. 目标止盈点</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.profit }}>
+                          {currencySymbol(selectedStock.market)}{card.take_profit_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>6. 铁血防守线</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.loss }}>
+                          {currencySymbol(selectedStock.market)}{card.stop_loss_price}
+                        </div>
+                      </Card>
+                    </Col>
+                  </Row>
+                ) : (
+                  <Row gutter={[12, 12]}>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>1. 当前现价</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold' }}>
+                          {currencySymbol(selectedStock.market)}{card.current_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>2. 建议买入价</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.primary }}>
+                          {currencySymbol(selectedStock.market)}{card.buy_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>3. 推荐仓位</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.warning }}>
+                          {card.position_pct}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>4. 止盈获利点</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.profit }}>
+                          {currencySymbol(selectedStock.market)}{card.take_profit_price}
+                        </div>
+                      </Card>
+                    </Col>
+                    <Col xs={12} sm={8} md={4} style={{ flex: 1 }}>
+                      <Card size="small" style={{ textAlign: 'center', background: colors.bgLight }}>
+                        <div style={{ fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}>5. 铁血止损点</div>
+                        <div style={{ fontSize: 22, fontWeight: 'bold', color: colors.loss }}>
+                          {currencySymbol(selectedStock.market)}{card.stop_loss_price}
+                        </div>
+                      </Card>
+                    </Col>
+                  </Row>
+                )}
+              </Card>
+            );
+          })()}
 
           <Row gutter={16}>
           <Col xs={24} lg={16}>

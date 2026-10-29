@@ -470,9 +470,24 @@ class StockService:
                 finally:
                     ex.shutdown(wait=False, cancel_futures=True)
 
-                price = info.get('currentPrice') or info.get('regularMarketPrice') or 0
-                change = info.get('regularMarketChange') or 0
-                change_pct = info.get('regularMarketChangePercent') or 0
+                market_state = str(info.get('marketState') or '').upper()
+                session_type = 'REGULAR'
+
+                # 探测美股盘前与盘后实时价格，穿透常规交易时段盲区
+                if market_state == 'PRE' and info.get('preMarketPrice') and float(info.get('preMarketPrice') or 0) > 0:
+                    price = float(info['preMarketPrice'])
+                    change = info.get('preMarketChange') or 0
+                    change_pct = info.get('preMarketChangePercent') or 0
+                    session_type = 'PRE'
+                elif market_state in ('POST', 'POSTPOST') and info.get('postMarketPrice') and float(info.get('postMarketPrice') or 0) > 0:
+                    price = float(info['postMarketPrice'])
+                    change = info.get('postMarketChange') or 0
+                    change_pct = info.get('postMarketChangePercent') or 0
+                    session_type = 'POST'
+                else:
+                    price = info.get('currentPrice') or info.get('regularMarketPrice') or 0
+                    change = info.get('regularMarketChange') or 0
+                    change_pct = info.get('regularMarketChangePercent') or 0
                 volume = info.get('volume') or 0
                 market_cap = info.get('marketCap') or 0
 
@@ -521,6 +536,8 @@ class StockService:
                     'pe_ratio': info.get('trailingPE', None),
                     'pb_ratio': info.get('priceToBook', None),
                     'degraded': timed_out,
+                    'market_state': market_state or 'REGULAR',
+                    'session_type': session_type,
                 }
 
             elif market == "A":
